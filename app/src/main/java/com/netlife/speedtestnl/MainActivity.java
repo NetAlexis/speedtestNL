@@ -86,6 +86,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean watcherRunning = false;   // banner watcher activo
     private final AtomicBoolean nperfTransitionStarted = new AtomicBoolean(false);
     private final AtomicBoolean finalSaveStarted = new AtomicBoolean(false);
+    private final AtomicBoolean nperfPollingStarted = new AtomicBoolean(false);
     private int nperfRetry = 0;
 
     // ── Config desde Google Sheets ────────────────────────────────────────
@@ -378,6 +379,7 @@ public class MainActivity extends AppCompatActivity {
         nGoPressed = false; nPageLoaded = false; nPollCount = 0;
         nSaved.set(false);
         nErrorDetected.set(false);
+        nperfPollingStarted.set(false);
 
         nperfRetry = 0;
         nperfTransitionStarted.set(false);
@@ -1083,7 +1085,7 @@ public class MainActivity extends AppCompatActivity {
         setStatus("Cargando nperf.com...");
         progressBar.setVisibility(View.VISIBLE);
 
-        clearWebViewSession(true);
+        prepareNperfSession();
         setNperfUserAgent();
         webView.loadUrl(NPERF_URL);
         handler.postDelayed(() -> {
@@ -1115,76 +1117,172 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void runNperfAfterDebug() {
-    attemptNperfStart(1);
-}
+        dismissNperfConsentThenStart(1);
+    }
 
-private void attemptNperfStart(int attempt) {
-    if (!"nperf".equals(phase) || nSaved.get() || webView == null) return;
+    private void dismissNperfConsentThenStart(int attempt) {
+        if (!"nperf".equals(phase) || nSaved.get() || webView == null) return;
+        setStatus("Revisando consentimiento nperf...");
 
-    setStatus("Buscando inicio nperf (" + attempt + "/5)...");
-    SpeedtestService.update(this,
-        "Preparando nperf - prueba " + currentRun,
-        "Prueba " + currentRun + " de " + totalRuns);
+        String jsConsent = "(function(){try{" +
+            "function visible(e){if(!e)return false;var r=e.getBoundingClientRect();" +
+            "var s=(e.ownerDocument.defaultView||window).getComputedStyle(e);" +
+            "return r.width>20&&r.height>15&&s.display!=='none'&&s.visibility!=='hidden';}" +
+            "function point(e,ox,oy){var r=e.getBoundingClientRect();" +
+            "return {x:ox+r.left+r.width/2,y:oy+r.top+r.height/2};}" +
+            "function scan(d,ox,oy){if(!d||!d.body)return null;" +
+            "var body=(d.body.innerText||'').toLowerCase();" +
+            "var cookie=body.indexOf('política de uso de cookies')>-1||" +
+            "body.indexOf('politica de uso de cookies')>-1||" +
+            "body.indexOf('cookie policy')>-1;" +
+            "if(!cookie)return null;" +
+            "var ns=d.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]');" +
+            "for(var i=0;i<ns.length;i++){var n=ns[i];" +
+            "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'').trim().toLowerCase();" +
+            "if(visible(n)&&(t==='ok'||t==='aceptar'||t==='accept'||t==='agree')){" +
+            "var p=point(n,ox,oy);try{n.click();}catch(x){}" +
+            "return {state:'consent',x:p.x,y:p.y};}}return null;}" +
+            "var r=scan(document,0,0);if(r)return JSON.stringify(r);" +
+            "var fs=document.querySelectorAll('iframe');" +
+            "for(var f=0;f<fs.length;f++){try{var fr=fs[f].getBoundingClientRect();" +
+            "r=scan(fs[f].contentDocument,fr.left,fr.top);if(r)return JSON.stringify(r);}catch(x){}}" +
+            "return JSON.stringify({state:'none'});" +
+            "}catch(e){return JSON.stringify({state:'error'});}})()";
 
-    String jsStart = "(function(){try{" +
-        "function visible(e){if(!e)return false;" +
-        "var r=e.getBoundingClientRect(),w=e.ownerDocument.defaultView||window;" +
-        "var s=w.getComputedStyle(e);" +
-        "return r.width>20&&r.height>20&&s.display!=='none'&&s.visibility!=='hidden';}" +
-        "function fire(e){try{e.scrollIntoView({block:'center',inline:'center'});}catch(x){}" +
-        "var r=e.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;" +
-        "['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){" +
-        "try{e.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true," +
-        "clientX:x,clientY:y,view:e.ownerDocument.defaultView||window}));}catch(x){}});" +
-        "try{e.click();}catch(x){}return true;}" +
-        "function hit(d){if(!d)return '';" +
-        "var sels=['#start-test','.start-test','.start-button','#start-button'," +
-        "'[data-testid*=start]','[class*=start][class*=test]','[id*=start][id*=test]'];" +
-        "for(var i=0;i<sels.length;i++){var e=d.querySelector(sels[i]);" +
-        "if(visible(e)){fire(e);return 'button';}}" +
-        "var nodes=d.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]');" +
-        "var words=['iniciar test','iniciar prueba','comenzar test','start test'," +
-        "'lancer le test','haz click aquí para probar de nuevo','haz clic aquí para probar de nuevo'];" +
-        "for(var j=0;j<nodes.length;j++){var n=nodes[j];" +
-        "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'').toLowerCase().trim();" +
-        "for(var k=0;k<words.length;k++){if(t.indexOf(words[k])>-1&&visible(n)){" +
-        "fire(n);return 'button';}}}" +
-        "var canvases=d.querySelectorAll('canvas');" +
-        "for(var c=0;c<canvases.length;c++){var cv=canvases[c],cr=cv.getBoundingClientRect();" +
-        "if(visible(cv)&&cr.width>120&&cr.height>120){fire(cv);return 'canvas';}}" +
-        "return '';}" +
-        "var result=hit(document);if(result)return result;" +
-        "var frames=document.querySelectorAll('iframe');" +
-        "for(var f=0;f<frames.length;f++){try{result=hit(frames[f].contentDocument);" +
-        "if(result)return 'iframe-'+result;}catch(x){}}" +
-        "var body=(document.body?document.body.innerText:'').toLowerCase();" +
-        "if(body.indexOf('accede a la aplicación')>-1||body.indexOf('accede a la aplicacion')>-1)" +
-        "return 'mobile-page';return 'none';}catch(e){return 'error:'+e.message;}})()";
+        webView.evaluateJavascript(jsConsent, value -> {
+            if (!"nperf".equals(phase) || nSaved.get()) return;
+            String json = decodeJsResult(value);
+            if ("consent".equals(key(json, "state"))) {
+                float x = parseFloatSafe(key(json, "x"));
+                float y = parseFloatSafe(key(json, "y"));
+                setStatus("Aceptando cookies nperf...");
+                tapWebViewCssPoint(x, y,
+                    () -> handler.postDelayed(() -> attemptNperfStart(attempt), 1600));
+            } else {
+                attemptNperfStart(attempt);
+            }
+        });
+    }
 
-    webView.evaluateJavascript(jsStart, value -> {
-        if (!"nperf".equals(phase) || nSaved.get()) return;
-        String result = value == null ? "" : value.toLowerCase(Locale.ROOT);
-        if (result.contains("button") || result.contains("canvas")) {
-            setStatus("nperf iniciado. Esperando resultados...");
-            SpeedtestService.update(MainActivity.this,
-                "nperf en curso - prueba " + currentRun,
-                "Prueba " + currentRun + " de " + totalRuns);
-            startNperfPolling();
-        } else if (attempt < 5) {
-            setStatus(result.contains("mobile-page")
-                ? "nperf mostró vista móvil. Esperando modo web..."
-                : "nperf aún inicializando. Nuevo intento...");
-            handler.postDelayed(() -> attemptNperfStart(attempt + 1), 3000);
-        } else {
-            nGoPressed = false;
-            setStatus("No se encontró el inicio de nperf. Reintentando carga...");
-            handler.postDelayed(this::retryNperf, 2000);
+    private void attemptNperfStart(int attempt) {
+        if (!"nperf".equals(phase) || nSaved.get() || webView == null) return;
+        setStatus("Buscando inicio nperf (" + attempt + "/8)...");
+
+        String jsStart = "(function(){try{" +
+            "function visible(e){if(!e)return false;var r=e.getBoundingClientRect();" +
+            "var s=(e.ownerDocument.defaultView||window).getComputedStyle(e);" +
+            "return r.width>20&&r.height>20&&s.display!=='none'&&s.visibility!=='hidden';}" +
+            "function point(e,ox,oy){var r=e.getBoundingClientRect();" +
+            "return {x:ox+r.left+r.width/2,y:oy+r.top+r.height/2};}" +
+            "function scan(d,ox,oy){if(!d)return null;" +
+            "var nodes=d.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit],div,span');" +
+            "var words=['iniciar test','iniciar prueba','comenzar test','start test','lancer le test'];" +
+            "for(var i=0;i<nodes.length;i++){var n=nodes[i];if(!visible(n))continue;" +
+            "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'').trim().toLowerCase();" +
+            "for(var w=0;w<words.length;w++){if(t===words[w]||t.indexOf(words[w])>-1){" +
+            "var p=point(n,ox,oy);return {state:'target',kind:'button',x:p.x,y:p.y};}}}" +
+            "var cs=d.querySelectorAll('canvas');var best=null,bestArea=0;" +
+            "for(var c=0;c<cs.length;c++){var cv=cs[c],cr=cv.getBoundingClientRect();" +
+            "var area=cr.width*cr.height;if(visible(cv)&&cr.width>140&&cr.height>140&&area>bestArea){" +
+            "best=cv;bestArea=area;}}" +
+            "if(best){var p=point(best,ox,oy);return {state:'target',kind:'canvas',x:p.x,y:p.y};}" +
+            "return null;}" +
+            "var r=scan(document,0,0);if(r)return JSON.stringify(r);" +
+            "var fs=document.querySelectorAll('iframe');" +
+            "for(var f=0;f<fs.length;f++){try{var fr=fs[f].getBoundingClientRect();" +
+            "r=scan(fs[f].contentDocument,fr.left,fr.top);if(r)return JSON.stringify(r);}catch(x){}}" +
+            "var body=(document.body?document.body.innerText:'').toLowerCase();" +
+            "if(body.indexOf('política de uso de cookies')>-1||body.indexOf('politica de uso de cookies')>-1)" +
+            "return JSON.stringify({state:'consent'});" +
+            "return JSON.stringify({state:'none'});" +
+            "}catch(e){return JSON.stringify({state:'error'});}})()";
+
+        webView.evaluateJavascript(jsStart, value -> {
+            if (!"nperf".equals(phase) || nSaved.get()) return;
+            String json = decodeJsResult(value);
+            String state = key(json, "state");
+            if ("consent".equals(state)) {
+                dismissNperfConsentThenStart(attempt);
+                return;
+            }
+            if ("target".equals(state)) {
+                float x = parseFloatSafe(key(json, "x"));
+                float y = parseFloatSafe(key(json, "y"));
+                String kind = key(json, "kind");
+                setStatus("Toque Android sobre nperf (" + kind + ")...");
+                tapWebViewCssPoint(x, y, () -> {
+                    setStatus("nperf iniciado. Esperando resultados...");
+                    SpeedtestService.update(MainActivity.this,
+                        "nperf en curso - prueba " + currentRun,
+                        "Prueba " + currentRun + " de " + totalRuns);
+                    startNperfPolling();
+                    scheduleNperfStartRetap(x, y, 1);
+                });
+            } else if (attempt < 8) {
+                setStatus("nperf aún inicializando. Nuevo intento...");
+                handler.postDelayed(() -> dismissNperfConsentThenStart(attempt + 1), 2500);
+            } else {
+                nGoPressed = false;
+                setStatus("No se encontró el inicio de nperf. Reintentando carga...");
+                handler.postDelayed(this::retryNperf, 2000);
+            }
+        });
+    }
+
+    private void scheduleNperfStartRetap(float cssX, float cssY, int retap) {
+        handler.postDelayed(() -> {
+            if (!"nperf".equals(phase) || nSaved.get()) return;
+            boolean hasMetrics = !nDownload.isEmpty() || !nUpload.isEmpty() || !nPing.isEmpty();
+            if (hasMetrics || retap > 1) return;
+            setStatus("Confirmando inicio nperf con segundo toque...");
+            tapWebViewCssPoint(cssX, cssY,
+                () -> scheduleNperfStartRetap(cssX, cssY, retap + 1));
+        }, 12000);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void tapWebViewCssPoint(float cssX, float cssY, Runnable afterTap) {
+        if (webView == null || cssX <= 0 || cssY <= 0) {
+            if (afterTap != null) afterTap.run();
+            return;
         }
-    });
-}
+        webView.post(() -> {
+            float scale = webView.getScale();
+            if (scale <= 0) scale = 1f;
+            float x = Math.max(1f, Math.min(webView.getWidth() - 1f, cssX * scale));
+            float y = Math.max(1f, Math.min(webView.getHeight() - 1f, cssY * scale));
+            long downTime = android.os.SystemClock.uptimeMillis();
+            android.view.MotionEvent down = android.view.MotionEvent.obtain(
+                downTime, downTime, android.view.MotionEvent.ACTION_DOWN, x, y, 0);
+            down.setSource(android.view.InputDevice.SOURCE_TOUCHSCREEN);
+            webView.dispatchTouchEvent(down);
+            down.recycle();
+
+            handler.postDelayed(() -> {
+                long upTime = android.os.SystemClock.uptimeMillis();
+                android.view.MotionEvent up = android.view.MotionEvent.obtain(
+                    downTime, upTime, android.view.MotionEvent.ACTION_UP, x, y, 0);
+                up.setSource(android.view.InputDevice.SOURCE_TOUCHSCREEN);
+                webView.dispatchTouchEvent(up);
+                up.recycle();
+                if (afterTap != null) handler.postDelayed(afterTap, 250);
+            }, 120);
+        });
+    }
+
+    private String decodeJsResult(String value) {
+        if (value == null || "null".equals(value)) return "";
+        return value.replaceAll("^\\\"|\\\"$", "").replace("\\\\\\\"", "\\\"");
+    }
+
+    private float parseFloatSafe(String value) {
+        try { return Float.parseFloat(value); }
+        catch (Exception e) { return 0f; }
+    }
 
 // ── Polling nperf cada 3s ─────────────────────────────────────────────
     private void startNperfPolling() {
+        if (!nperfPollingStarted.compareAndSet(false, true)) return;
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
@@ -1414,6 +1512,19 @@ private void setNperfUserAgent() {
         android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
         cm.setAcceptCookie(acceptCookies);
         cm.removeAllCookies(null);
+        cm.flush();
+    }
+
+    private void prepareNperfSession() {
+        if (webView == null) return;
+        webView.stopLoading();
+        webView.clearHistory();
+        webView.clearFormData();
+        android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+        cm.setAcceptCookie(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            cm.setAcceptThirdPartyCookies(webView, true);
+        }
         cm.flush();
     }
 

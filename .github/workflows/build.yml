@@ -1,38 +1,62 @@
-name: Apply nPerf Native Touch Fix
+name: Android Build
 
 on:
   push:
     branches:
-      - agent/stabilize-speedtest-nperf
+      - main
+      - agent/**
+  pull_request:
+    branches:
+      - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  migrate:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout correction branch
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          ref: agent/stabilize-speedtest-nperf
-          fetch-depth: 0
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
 
-      - name: Apply guarded correction
-        run: python scripts/apply_nperf_native_touch.py
+      - name: Set up Gradle 8.4
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.4'
 
-      - name: Verify and restore temporary files
-        run: |
-          git diff --check
-          git show origin/agent/restore-build-baseline:.github/workflows/build.yml > .github/workflows/build.yml
-          printf '# speedtestNL\n' > README.md
-          rm scripts/apply_nperf_native_touch.py
-          git diff --check
+      - name: Generate Gradle wrapper
+        run: gradle wrapper --gradle-version 8.4
 
-      - name: Commit corrected implementation
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/netlife/speedtestnl/MainActivity.java .github/workflows/build.yml README.md scripts/apply_nperf_native_touch.py
-          git commit -m "Handle nPerf consent with native Android touch"
-          git push origin HEAD:agent/stabilize-speedtest-nperf
+      - name: Grant execute permission
+        run: chmod +x gradlew
+
+      - name: Run lint
+        run: ./gradlew lintRelease --stacktrace
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeedtestNL-release
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeedtestNL-lint
+          path: app/build/reports/lint-results-release.html
+          if-no-files-found: ignore
+          retention-days: 14
