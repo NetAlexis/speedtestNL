@@ -1,0 +1,31 @@
+{
+  "manifest_version": 2,
+  "name": "SpeedtestNL nPerf Automation",
+  "version": "1.0.0",
+  "description": "Controls the public nPerf web test inside SpeedtestNL GeckoView.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "nperf-automation@speedtestnl.local"
+    }
+  },
+  "permissions": [
+    "nativeMessaging",
+    "nativeMessagingFromContent",
+    "geckoViewAddons",
+    "https://www.nperf.com/*",
+    "https://*.nperf.com/*",
+    "https://*.nperf.net/*",
+    "http://*.nperf.net/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.nperf.com/*",
+        "https://*.nperf.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
