@@ -76,6 +76,8 @@ public class MainActivity extends AppCompatActivity {
     private String  nJitter    = "";
     private String  nServer    = "";
     private String  nOperator  = "";
+    private String  nResultId  = "";
+    private String  nResultUrl = "";
     private boolean nDone      = false;
     private boolean nGoPressed = false;
     private boolean nPageLoaded= false;
@@ -375,7 +377,7 @@ public class MainActivity extends AppCompatActivity {
         errorDetected.set(false);
 
         nDownload = ""; nUpload = ""; nPing = ""; nJitter = "";
-        nServer = ""; nOperator = ""; nDone = false;
+        nServer = ""; nOperator = ""; nResultId = ""; nResultUrl = ""; nDone = false;
         nGoPressed = false; nPageLoaded = false; nPollCount = 0;
         nSaved.set(false);
         nErrorDetected.set(false);
@@ -696,7 +698,8 @@ public class MainActivity extends AppCompatActivity {
                 if (url == null) return;
                 if ("speedtest".equals(phase) && url.contains("/result/") && !saved.get()) {
                     handler.postDelayed(() -> completeSpeedtestFromUrl(url), 4000);
-                } else if ("nperf".equals(phase) && url.contains("/result") && !nSaved.get()) {
+                } else if ("nperf".equals(phase) && isNperfResultUrl(url) && !nSaved.get()) {
+                    captureNperfResultUrl(url);
                     if (nSaved.compareAndSet(false, true))
                         handler.postDelayed(MainActivity.this::extractNperfMetrics, 4000);
                 }
@@ -999,7 +1002,9 @@ public class MainActivity extends AppCompatActivity {
             "  Latencia     : " + f(nPing,    "ms")   + "\n" +
             "  Jitter       : " + f(nJitter,  "ms")   + "\n" +
             "  Servidor     : " + (nServer.isEmpty()   ? "N/A" : nServer)   + "\n" +
-            "  Operador     : " + (nOperator.isEmpty() ? "N/A" : nOperator) + "\n\n" +
+            "  Operador     : " + (nOperator.isEmpty() ? "N/A" : nOperator) + "\n" +
+            "  Result ID    : " + (nResultId.isEmpty() ? "N/A" : nResultId) + "\n" +
+            "  URL          : " + (nResultUrl.isEmpty() ? "N/A" : nResultUrl) + "\n\n" +
             "==================================================\n" +
             "  Speedtest NL - Netlife\n" +
             "==================================================\n";
@@ -1079,8 +1084,9 @@ public class MainActivity extends AppCompatActivity {
 
         nGoPressed = false; nPageLoaded = false; nPollCount = 0;
         nDownload = ""; nUpload = ""; nPing = ""; nJitter = "";
-        nServer = ""; nOperator = "";
+        nServer = ""; nOperator = ""; nResultId = ""; nResultUrl = "";
         nSaved.set(false); nErrorDetected.set(false);
+        nperfPollingStarted.set(false);
 
         setStatus("Cargando nperf.com...");
         progressBar.setVisibility(View.VISIBLE);
@@ -1140,7 +1146,7 @@ public class MainActivity extends AppCompatActivity {
             "for(var i=0;i<ns.length;i++){var n=ns[i];" +
             "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'').trim().toLowerCase();" +
             "if(visible(n)&&(t==='ok'||t==='aceptar'||t==='accept'||t==='agree')){" +
-            "var p=point(n,ox,oy);try{n.click();}catch(x){}" +
+            "var p=point(n,ox,oy);" +
             "return {state:'consent',x:p.x,y:p.y};}}return null;}" +
             "var r=scan(document,0,0);if(r)return JSON.stringify(r);" +
             "var fs=document.querySelectorAll('iframe');" +
@@ -1177,10 +1183,15 @@ public class MainActivity extends AppCompatActivity {
             "function scan(d,ox,oy){if(!d)return null;" +
             "var nodes=d.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit],div,span');" +
             "var words=['iniciar test','iniciar prueba','comenzar test','start test','lancer le test'];" +
+            "var bestNode=null,bestArea=1e20;" +
             "for(var i=0;i<nodes.length;i++){var n=nodes[i];if(!visible(n))continue;" +
             "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'').trim().toLowerCase();" +
-            "for(var w=0;w<words.length;w++){if(t===words[w]||t.indexOf(words[w])>-1){" +
-            "var p=point(n,ox,oy);return {state:'target',kind:'button',x:p.x,y:p.y};}}}" +
+            "if(t.length>80)continue;var match=false;" +
+            "for(var w=0;w<words.length;w++){if(t===words[w]||t.indexOf(words[w])>-1){match=true;break;}}" +
+            "if(match){var nr=n.getBoundingClientRect(),area=nr.width*nr.height;" +
+            "if(area>0&&area<bestArea){bestNode=n;bestArea=area;}}}" +
+            "if(bestNode){var p=point(bestNode,ox,oy);" +
+            "return {state:'target',kind:'button',x:p.x,y:p.y};}" +
             "var cs=d.querySelectorAll('canvas');var best=null,bestArea=0;" +
             "for(var c=0;c<cs.length;c++){var cv=cs[c],cr=cv.getBoundingClientRect();" +
             "var area=cr.width*cr.height;if(visible(cv)&&cr.width>140&&cr.height>140&&area>bestArea){" +
@@ -1280,6 +1291,20 @@ public class MainActivity extends AppCompatActivity {
         catch (Exception e) { return 0f; }
     }
 
+    private boolean isNperfResultUrl(String url) {
+        if (url == null) return false;
+        String lower = url.toLowerCase(Locale.ROOT);
+        return lower.contains("nperf.com") &&
+            (lower.contains("/r/") || lower.contains("/result"));
+    }
+
+    private void captureNperfResultUrl(String url) {
+        if (url == null || url.isEmpty()) return;
+        nResultUrl = url;
+        Matcher matcher = Pattern.compile("/r/(\\d+)(?:-|/|$)").matcher(url);
+        if (matcher.find()) nResultId = matcher.group(1);
+    }
+
 // ── Polling nperf cada 3s ─────────────────────────────────────────────
     private void startNperfPolling() {
         if (!nperfPollingStarted.compareAndSet(false, true)) return;
@@ -1297,7 +1322,8 @@ public class MainActivity extends AppCompatActivity {
 
                 // Monitorear URL — nperf cambia URL al terminar
                 String curUrl = webView.getUrl();
-                if (curUrl != null && curUrl.contains("/result")) {
+                if (isNperfResultUrl(curUrl)) {
+                    captureNperfResultUrl(curUrl);
                     if (nSaved.compareAndSet(false, true)) {
                         extractNperfMetrics();
                         return;
@@ -1319,11 +1345,13 @@ public class MainActivity extends AppCompatActivity {
                         "    return '';" +
                         "  }" +
                         "  var b=document.body?document.body.innerHTML:'';" +
+                        "  var bt=(document.body?document.body.innerText:'').toLowerCase();" +
                         "  var hasError=b.indexOf('ERREUR')>-1||b.indexOf('ERROR')>-1" +
                         "    ||b.indexOf('error')>-1&&b.indexOf('test-error')>-1;" +
-                        // Detectar si la prueba terminó: aparece "Reiniciar"
-                        "  var done=b.indexOf('Reiniciar')>-1" +
-                        "    ||b.indexOf('Restart')>-1||b.indexOf('Reinitier')>-1;" +
+                        "  var done=bt.indexOf('haz click aquí para probar de nuevo')>-1" +
+                        "    ||bt.indexOf('haz clic aquí para probar de nuevo')>-1" +
+                        "    ||bt.indexOf('reiniciar')>-1||bt.indexOf('restart')>-1" +
+                        "    ||bt.indexOf('reinitier')>-1;" +
                         "  var dl=g(['.download-value','#download-value'," +
                         "    '[class*=download][class*=value]','[id*=download]'," +
                         "    '.result-download']);" +
@@ -1398,7 +1426,7 @@ public class MainActivity extends AppCompatActivity {
             // Prueba terminada — "Reiniciar" visible O tenemos DL+UL
             boolean hasDl   = !nDownload.isEmpty() && !nDownload.equals("0");
             boolean hasUl   = !nUpload.isEmpty()   && !nUpload.equals("0");
-            boolean finished = "true".equals(done) || (hasDl && hasUl);
+            boolean finished = "true".equals(done) && hasDl && hasUl;
 
             if (finished && nSaved.compareAndSet(false, true)) {
                 handler.post(() -> {
@@ -1413,44 +1441,44 @@ public class MainActivity extends AppCompatActivity {
     private void extractNperfMetrics() {
         if (webView == null) { saveTxt(); return; }
         webView.evaluateJavascript(
-            "(function(){" +
-            "  function g(ss){" +
-            "    for(var i=0;i<ss.length;i++){" +
-            "      var els=document.querySelectorAll(ss[i]);" +
-            "      for(var j=0;j<els.length;j++){" +
-            "        var v=els[j].textContent.trim();" +
-            "        var n=parseFloat(v.replace(/[^0-9.]/g,''));" +
-            "        if(!isNaN(n)&&n>0)return ''+n;" +
-            "      }" +
-            "    }" +
-            "    return '';" +
-            "  }" +
-            "  return JSON.stringify({" +
-            "    dl:g(['.download-value','#download-value','[class*=download]'])," +
-            "    ul:g(['.upload-value','#upload-value','[class*=upload]'])," +
-            "    pg:g(['.latency-value','#latency-value','[class*=latency]'])," +
-            "    jt:g(['.jitter-value','#jitter-value','[class*=jitter]'])," +
-            "    srv:(document.querySelector('[class*=server]," +
-            "      [class*=isp-name]')||{}).textContent||''," +
-            "    op:(document.querySelector('[class*=operator]," +
-            "      [class*=isp]')||{}).textContent||''" +
-            "  });" +
-            "})()",
+            "(function(){try{" +
+            "var lines=(document.body?document.body.innerText:'').split(/\\n+/)" +
+            ".map(function(s){return s.trim();}).filter(function(s){return s.length>0;});" +
+            "function norm(s){return (s||'').toLowerCase().replace(/:$/,'').trim();}" +
+            "function metric(labels){for(var i=0;i<lines.length;i++){var n=norm(lines[i]);" +
+            "for(var l=0;l<labels.length;l++){if(n===labels[l]||n.indexOf(labels[l])===0){" +
+            "for(var j=i+1;j<Math.min(lines.length,i+7);j++){var v=lines[j];" +
+            "if(/average|promedio|media/.test(norm(v)))continue;" +
+            "var m=v.match(/^([0-9]+(?:[.,][0-9]+)?)$/)||" +
+            "v.match(/([0-9]+(?:[.,][0-9]+)?)\\s*(?:mb\\/s|ms)/i);" +
+            "if(m)return m[1].replace(',','.');}}}}return ''; }" +
+            "function jitter(){for(var i=0;i<lines.length;i++){" +
+            "var m=lines[i].match(/jitter\\s*[:]?\\s*([0-9]+(?:[.,][0-9]+)?)/i);" +
+            "if(m)return m[1].replace(',','.');}return ''; }" +
+            "function after(labels){for(var i=0;i<lines.length;i++){var n=norm(lines[i]);" +
+            "for(var l=0;l<labels.length;l++){if(n===labels[l]){" +
+            "for(var j=i+1;j<Math.min(lines.length,i+5);j++){var v=lines[j];" +
+            "if(v&&!/^(mb\\/s|ms)$/i.test(v)&&!/^average/i.test(v))return v;}}}}return ''; }" +
+            "return JSON.stringify({" +
+            "dl:metric(['download','descarga','velocidad de descarga'])," +
+            "ul:metric(['upload','subida','velocidad de subida'])," +
+            "pg:metric(['latency','latencia','ping'])," +
+            "jt:jitter()," +
+            "op:after(['connection','conexión','conexion'])," +
+            "srv:after(['server','servidor'])" +
+            "});}catch(e){return JSON.stringify({error:e.message});}})()",
             value -> {
-                if (value != null && !value.equals("null")) {
-                    try {
-                        String v = value.replaceAll("^\"|\"$","");
-                        String dl = key(v,"dl"), ul = key(v,"ul");
-                        String pg = key(v,"pg"), jt = key(v,"jt");
-                        String srv = key(v,"srv"), op = key(v,"op");
-                        if (!dl.isEmpty())  nDownload  = dl;
-                        if (!ul.isEmpty())  nUpload    = ul;
-                        if (!pg.isEmpty())  nPing      = pg;
-                        if (!jt.isEmpty())  nJitter    = jt;
-                        if (!srv.isEmpty()) nServer    = srv.trim();
-                        if (!op.isEmpty())  nOperator  = op.trim();
-                    } catch (Exception e) { e.printStackTrace(); }
-                }
+                String json = decodeJsResult(value);
+                String dl = key(json,"dl"), ul = key(json,"ul");
+                String pg = key(json,"pg"), jt = key(json,"jt");
+                String srv = key(json,"srv"), op = key(json,"op");
+                if (!dl.isEmpty())  nDownload  = dl;
+                if (!ul.isEmpty())  nUpload    = ul;
+                if (!pg.isEmpty())  nPing      = pg;
+                if (!jt.isEmpty())  nJitter    = jt;
+                if (!srv.isEmpty()) nServer    = srv.trim();
+                if (!op.isEmpty())  nOperator  = op.trim();
+                handler.post(this::showPanel);
                 handler.postDelayed(MainActivity.this::saveTxt, 1000);
             }
         );
@@ -1695,7 +1723,9 @@ private void setNperfUserAgent() {
         layoutResults.setVisibility(View.VISIBLE);
         if (phase.equals("nperf")) {
             // Mostrar valores de nperf
-            tvResultId.setText("nperf — " + (nServer.isEmpty() ? "midiendo..." : nServer));
+            tvResultId.setText(!nResultId.isEmpty()
+                ? "nPerf ID: " + nResultId
+                : "nperf — " + (nServer.isEmpty() ? "midiendo..." : nServer));
             tvDownload.setText(nDownload.isEmpty() ? "-" : nDownload + " Mb/s");
             tvUpload.setText(nUpload.isEmpty()     ? "-" : nUpload   + " Mb/s");
             tvPing.setText(nPing.isEmpty()         ? "-" : nPing     + " ms");
