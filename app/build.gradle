@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    compileSdk 37
+    compileSdk 36
     namespace 'com.netlife.speedtestnl'
 
     defaultConfig {
@@ -47,5 +47,5 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
 
-    implementation 'org.mozilla.geckoview:geckoview-nightly:155.0.20260728095222'
+    implementation 'org.mozilla.geckoview:geckoview:152.0.20260713164047'
 }
