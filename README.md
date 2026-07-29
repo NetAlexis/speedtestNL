@@ -53,4 +53,6 @@ La pantalla debe avanzar por estados similares a estos:
 
 Si el inicio automático no se confirma, la pantalla mostrará que se puede tocar **Iniciar test** manualmente y la página permanecerá abierta, sin ejecutar el ciclo de recarga anterior. Los resultados de nPerf incluyen, cuando están disponibles, su identificador y URL `/r/...` en el TXT combinado.
 
+Para diagnóstico con Android Studio o ADB, el controlador registra detecciones, coordenadas y toques con la etiqueta de Logcat `SpeedtestNL-nPerf`.
+
 El Pull Request debe permanecer en borrador mientras la prueba completa en un dispositivo Android no haya terminado correctamente.
