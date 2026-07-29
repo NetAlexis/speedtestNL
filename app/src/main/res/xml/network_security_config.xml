@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">speedtest.net</domain>
+        <domain includeSubdomains="true">speedtest.com</domain>
+        <domain includeSubdomains="true">ooklaserver.net</domain>
+        <domain includeSubdomains="true">docs.google.com</domain>
+    </domain-config>
+</network-security-config>
