@@ -23,12 +23,26 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // GeckoView bundles native libraries. Generate one APK per Android ABI so
+    // each device downloads only the engine it needs.
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'arm64-v8a', 'armeabi-v7a'
+            universalApk false
+        }
     }
 }
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
+
+    // Current GeckoView nightly used by the implementation and API docs.
+    implementation 'org.mozilla.geckoview:geckoview-nightly:155.0.20260728095222'
 }
