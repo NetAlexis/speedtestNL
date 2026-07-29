@@ -32,26 +32,29 @@ jobs:
           path = Path('app/src/main/java/com/netlife/speedtestnl/MainActivity.java')
           text = path.read_text(encoding='utf-8')
 
-          old_ua = '''    private static final String NPERF_USER_AGENT =
-              "Mozilla/5.0 (Linux; Android 12; Mobile) " +
-              "AppleWebKit/537.36 (KHTML, like Gecko) " +
-              "Chrome/120.0.0.0 Mobile Safari/537.36";'''
-          new_ua = '''    private static final String NPERF_USER_AGENT =
+          ua_pattern = re.compile(
+              r'    private static final String NPERF_USER_AGENT =\n'
+              r'\s*"Mozilla/5\.0 \(Linux; Android 12; Mobile\) " \+\n'
+              r'\s*"AppleWebKit/537\.36 \(KHTML, like Gecko\) " \+\n'
+              r'\s*"Chrome/120\.0\.0\.0 Mobile Safari/537\.36";'
+          )
+          ua_replacement = '''    private static final String NPERF_USER_AGENT =
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
               "AppleWebKit/537.36 (KHTML, like Gecko) " +
               "Chrome/120.0.0.0 Safari/537.36";'''
-          if text.count(old_ua) != 1:
-              raise SystemExit('Unexpected nPerf user-agent block')
-          text = text.replace(old_ua, new_ua, 1)
+          text, count = ua_pattern.subn(lambda _: ua_replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'Unexpected nPerf user-agent count: {count}')
 
-          old_setters = '''    private void setSpeedtestUserAgent() {
-              if (webView != null) webView.getSettings().setUserAgentString(SPEEDTEST_USER_AGENT);
-          }
-
-          private void setNperfUserAgent() {
-              if (webView != null) webView.getSettings().setUserAgentString(NPERF_USER_AGENT);
-          }'''
-          new_setters = '''    private void setSpeedtestUserAgent() {
+          setters_pattern = re.compile(
+              r'    private void setSpeedtestUserAgent\(\) \{\n'
+              r'\s*if \(webView != null\) webView\.getSettings\(\)\.setUserAgentString\(SPEEDTEST_USER_AGENT\);\n'
+              r'    \}\n\n'
+              r'    private void setNperfUserAgent\(\) \{\n'
+              r'\s*if \(webView != null\) webView\.getSettings\(\)\.setUserAgentString\(NPERF_USER_AGENT\);\n'
+              r'    \}'
+          )
+          setters_replacement = '''    private void setSpeedtestUserAgent() {
               if (webView != null) {
                   webView.getSettings().setUserAgentString(SPEEDTEST_USER_AGENT);
                   webView.getSettings().setTextZoom(30);
@@ -64,15 +67,15 @@ jobs:
                   webView.getSettings().setTextZoom(100);
               }
           }'''
-          if text.count(old_setters) != 1:
-              raise SystemExit('Unexpected user-agent setter block')
-          text = text.replace(old_setters, new_setters, 1)
+          text, count = setters_pattern.subn(lambda _: setters_replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'Unexpected user-agent setter count: {count}')
 
-          pattern = re.compile(
+          start_pattern = re.compile(
               r'    private void runNperfAfterDebug\(\) \{.*?\n    \}\n\n    // ── Polling nperf cada 3s',
               re.DOTALL,
           )
-          replacement = '''    private void runNperfAfterDebug() {
+          start_replacement = '''    private void runNperfAfterDebug() {
               attemptNperfStart(1);
           }
 
@@ -86,8 +89,7 @@ jobs:
 
               String jsStart = "(function(){try{" +
                   "function visible(e){if(!e)return false;" +
-                  "var r=e.getBoundingClientRect();" +
-                  "var w=e.ownerDocument.defaultView||window;" +
+                  "var r=e.getBoundingClientRect(),w=e.ownerDocument.defaultView||window;" +
                   "var s=w.getComputedStyle(e);" +
                   "return r.width>20&&r.height>20&&s.display!=='none'&&s.visibility!=='hidden';}" +
                   "function fire(e){try{e.scrollIntoView({block:'center',inline:'center'});}catch(x){}" +
@@ -98,23 +100,18 @@ jobs:
                   "try{e.click();}catch(x){}return true;}" +
                   "function hit(d){if(!d)return '';" +
                   "var sels=['#start-test','.start-test','.start-button','#start-button'," +
-                  "'[data-testid*=start]','[class*=start][class*=test]'," +
-                  "'[id*=start][id*=test]'];" +
+                  "'[data-testid*=start]','[class*=start][class*=test]','[id*=start][id*=test]'];" +
                   "for(var i=0;i<sels.length;i++){var e=d.querySelector(sels[i]);" +
                   "if(visible(e)){fire(e);return 'button';}}" +
-                  "var nodes=d.querySelectorAll('button,a,[role=button]," +
-                  "input[type=button],input[type=submit]');" +
+                  "var nodes=d.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]');" +
                   "var words=['iniciar test','iniciar prueba','comenzar test','start test'," +
-                  "'lancer le test','haz click aquí para probar de nuevo'," +
-                  "'haz clic aquí para probar de nuevo'];" +
+                  "'lancer le test','haz click aquí para probar de nuevo','haz clic aquí para probar de nuevo'];" +
                   "for(var j=0;j<nodes.length;j++){var n=nodes[j];" +
-                  "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'')" +
-                  ".toLowerCase().trim();" +
+                  "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'').toLowerCase().trim();" +
                   "for(var k=0;k<words.length;k++){if(t.indexOf(words[k])>-1&&visible(n)){" +
                   "fire(n);return 'button';}}}" +
                   "var canvases=d.querySelectorAll('canvas');" +
-                  "for(var c=0;c<canvases.length;c++){var cv=canvases[c];" +
-                  "var cr=cv.getBoundingClientRect();" +
+                  "for(var c=0;c<canvases.length;c++){var cv=canvases[c],cr=cv.getBoundingClientRect();" +
                   "if(visible(cv)&&cr.width>120&&cr.height>120){fire(cv);return 'canvas';}}" +
                   "return '';}" +
                   "var result=hit(document);if(result)return result;" +
@@ -122,25 +119,19 @@ jobs:
                   "for(var f=0;f<frames.length;f++){try{result=hit(frames[f].contentDocument);" +
                   "if(result)return 'iframe-'+result;}catch(x){}}" +
                   "var body=(document.body?document.body.innerText:'').toLowerCase();" +
-                  "if(body.indexOf('accede a la aplicación')>-1||" +
-                  "body.indexOf('accede a la aplicacion')>-1)return 'mobile-page';" +
-                  "return 'none';}catch(e){return 'error:'+e.message;}})()";
+                  "if(body.indexOf('accede a la aplicación')>-1||body.indexOf('accede a la aplicacion')>-1)" +
+                  "return 'mobile-page';return 'none';}catch(e){return 'error:'+e.message;}})()";
 
               webView.evaluateJavascript(jsStart, value -> {
                   if (!"nperf".equals(phase) || nSaved.get()) return;
                   String result = value == null ? "" : value.toLowerCase(Locale.ROOT);
-                  boolean started = result.contains("button") || result.contains("canvas");
-
-                  if (started) {
+                  if (result.contains("button") || result.contains("canvas")) {
                       setStatus("nperf iniciado. Esperando resultados...");
                       SpeedtestService.update(MainActivity.this,
                           "nperf en curso - prueba " + currentRun,
                           "Prueba " + currentRun + " de " + totalRuns);
                       startNperfPolling();
-                      return;
-                  }
-
-                  if (attempt < 5) {
+                  } else if (attempt < 5) {
                       setStatus(result.contains("mobile-page")
                           ? "nperf mostró vista móvil. Esperando modo web..."
                           : "nperf aún inicializando. Nuevo intento...");
@@ -154,7 +145,7 @@ jobs:
           }
 
           // ── Polling nperf cada 3s'''
-          text, count = pattern.subn(lambda _: replacement, text, count=1)
+          text, count = start_pattern.subn(lambda _: start_replacement, text, count=1)
           if count != 1:
               raise SystemExit(f'Unexpected nPerf start method count: {count}')
 
