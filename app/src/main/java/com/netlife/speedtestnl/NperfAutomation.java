@@ -4,7 +4,9 @@ import android.os.Handler;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.InputDevice;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.View;
 import android.webkit.WebView;
 
 import org.json.JSONObject;
@@ -13,11 +15,11 @@ import org.json.JSONTokener;
 import java.util.Locale;
 
 /**
- * Controls the nPerf consent and start screen without reloading the WebView.
+ * Controls nPerf consent and start activation without reloading the WebView.
  *
- * JavaScript is used only to inspect the DOM and obtain viewport coordinates.
- * The actual interaction is sent as a native Android touch event so nPerf sees
- * the same input path as a physical screen tap.
+ * DOM inspection only discovers state and coordinates. User activation is sent
+ * through native Android key/touch events, which is more reliable for canvas
+ * based controls than synthetic JavaScript events.
  */
 final class NperfAutomation {
 
@@ -25,11 +27,12 @@ final class NperfAutomation {
         void onStatus(String message);
         void onStartTouchSent();
         void onManualStartAvailable();
+        void onEngineError(String message);
     }
 
     private static final String TAG = "SpeedtestNL-nPerf";
-    private static final int MAX_START_TAPS = 4;
-    private static final int MAX_ACTIVE_SCANS = 12;
+    private static final int MAX_START_ACTIVATIONS = 5;
+    private static final int MAX_ACTIVE_SCANS = 16;
 
     private final WebView webView;
     private final Handler handler;
@@ -37,7 +40,8 @@ final class NperfAutomation {
 
     private int generation = 0;
     private int scanCount = 0;
-    private int startTapCount = 0;
+    private int startActivationCount = 0;
+    private int visualFallbackIndex = 0;
     private boolean pollingNotified = false;
     private boolean manualNoticeSent = false;
 
@@ -50,10 +54,11 @@ final class NperfAutomation {
     void begin() {
         generation++;
         scanCount = 0;
-        startTapCount = 0;
+        startActivationCount = 0;
+        visualFallbackIndex = 0;
         pollingNotified = false;
         manualNoticeSent = false;
-        inspect(generation, 350L);
+        inspect(generation, 250L);
     }
 
     void cancel() {
@@ -72,36 +77,52 @@ final class NperfAutomation {
                 if (!isActive(token)) return;
 
                 JSONObject result = parseJavascriptObject(value);
-                String state = result.optString("state", "invalid").toLowerCase(Locale.ROOT);
+                String state = result.optString("state", "invalid")
+                    .toLowerCase(Locale.ROOT);
+                String message = result.optString("message", "");
+                String kind = result.optString("kind", "");
                 float x = (float) result.optDouble("x", -1d);
                 float y = (float) result.optDouble("y", -1d);
                 float viewportWidth = (float) result.optDouble("vw", -1d);
                 float viewportHeight = (float) result.optDouble("vh", -1d);
-                String kind = result.optString("kind", "");
 
                 Log.i(TAG, "scan=" + scanCount + " state=" + state +
                     " kind=" + kind + " css=" + x + "," + y +
-                    " viewport=" + viewportWidth + "x" + viewportHeight);
+                    " viewport=" + viewportWidth + "x" + viewportHeight +
+                    (message.isEmpty() ? "" : " message=" + message));
 
                 switch (state) {
+                    case "engine_error":
+                        generation++;
+                        listener.onEngineError(message.isEmpty()
+                            ? "nPerf no pudo inicializar el motor" : message);
+                        break;
+
                     case "consent":
                         listener.onStatus("Aceptando cookies nperf...");
-                        tapCssPoint(token, x, y, viewportWidth, viewportHeight,
-                            () -> inspect(token, 1200L));
+                        activateTarget(token, x, y, viewportWidth, viewportHeight,
+                            true, false, () -> inspect(token, 1100L));
                         break;
 
                     case "start":
-                        sendStartTouch(token, x, y, viewportWidth, viewportHeight, kind);
+                        sendStartActivation(token, x, y, viewportWidth,
+                            viewportHeight, kind, true);
                         break;
 
                     case "canvas":
-                        if (startTapCount < 2) {
-                            sendStartTouch(token, x, y, viewportWidth, viewportHeight, "canvas");
-                        } else {
-                            notifyPollingOnce();
-                            listener.onStatus("nperf: esperando que el medidor responda...");
-                            inspect(token, 5000L);
-                        }
+                        sendStartActivation(token, x, y, viewportWidth,
+                            viewportHeight, "canvas", false);
+                        break;
+
+                    case "initializing":
+                        listener.onStatus("nperf inicializando motor y servidor...");
+                        inspect(token, 1300L);
+                        break;
+
+                    case "running":
+                        notifyPollingOnce();
+                        listener.onStatus("nperf iniciado. Esperando resultados...");
+                        inspect(token, 5000L);
                         break;
 
                     case "none":
@@ -115,45 +136,74 @@ final class NperfAutomation {
         }, delayMs);
     }
 
-    private void sendStartTouch(int token, float x, float y,
-            float viewportWidth, float viewportHeight, String kind) {
+    private void sendStartActivation(int token, float x, float y,
+            float viewportWidth, float viewportHeight, String kind,
+            boolean keyboardFirst) {
         if (!isActive(token)) return;
 
-        if (startTapCount >= MAX_START_TAPS) {
+        if (startActivationCount >= MAX_START_ACTIVATIONS) {
             notifyPollingOnce();
             showManualNoticeOnce();
             inspect(token, 7000L);
             return;
         }
 
-        startTapCount++;
-        listener.onStatus("Enviando toque a Iniciar test (" + startTapCount +
-            "/" + MAX_START_TAPS + ")...");
-        tapCssPoint(token, x, y, viewportWidth, viewportHeight, () -> {
+        startActivationCount++;
+        listener.onStatus("Activando Iniciar test (" + startActivationCount +
+            "/" + MAX_START_ACTIVATIONS + ", " + kind + ")...");
+
+        activateTarget(token, x, y, viewportWidth, viewportHeight,
+            keyboardFirst, true, () -> {
+                if (!isActive(token)) return;
+                notifyPollingOnce();
+                listener.onStatus("Activación enviada a nperf; verificando motor...");
+                inspect(token, 2600L);
+            });
+    }
+
+    private void activateTarget(int token, float x, float y,
+            float viewportWidth, float viewportHeight, boolean keyboardFirst,
+            boolean sendTouch, Runnable after) {
+        if (!isActive(token)) return;
+
+        Runnable touchOrFinish = () -> {
             if (!isActive(token)) return;
-            notifyPollingOnce();
-            listener.onStatus("Toque enviado a nperf; verificando inicio...");
-            inspect(token, 3200L);
-        });
+            if (sendTouch) {
+                tapCssPoint(token, x, y, viewportWidth, viewportHeight, after);
+            } else if (after != null) {
+                handler.postDelayed(after, 250L);
+            }
+        };
+
+        if (keyboardFirst) {
+            dispatchEnter(token, () -> handler.postDelayed(touchOrFinish, 220L));
+        } else {
+            touchOrFinish.run();
+        }
     }
 
     private void handleNoTarget(int token, String state) {
         if (!isActive(token)) return;
 
-        // Deterministic fallbacks based on the nPerf layout. They are expressed
-        // as percentages of the WebView, so they remain stable across devices.
+        // First fallback targets the consent button shown at the bottom.
         if (scanCount == 1) {
             listener.onStatus("Buscando consentimiento nperf...");
-            tapNormalized(token, 0.50f, 0.91f, () -> inspect(token, 1300L));
+            tapNormalized(token, 0.50f, 0.92f, () -> inspect(token, 1100L));
             return;
         }
 
-        if (scanCount == 2) {
-            listener.onStatus("Aplicando toque de respaldo a Iniciar test...");
-            startTapCount++;
-            tapNormalized(token, 0.50f, 0.52f, () -> {
+        // Canvas/layout fallback: sweep only the vertical area where the dark
+        // circular start control is rendered on desktop nPerf.
+        final float[] startY = {0.31f, 0.39f, 0.47f};
+        if (visualFallbackIndex < startY.length &&
+                startActivationCount < MAX_START_ACTIVATIONS) {
+            float y = startY[visualFallbackIndex++];
+            startActivationCount++;
+            listener.onStatus("Toque visual de respaldo nperf (" +
+                visualFallbackIndex + "/" + startY.length + ")...");
+            tapNormalized(token, 0.50f, y, () -> {
                 notifyPollingOnce();
-                inspect(token, 3200L);
+                inspect(token, 2600L);
             });
             return;
         }
@@ -163,8 +213,8 @@ final class NperfAutomation {
             showManualNoticeOnce();
             inspect(token, 8000L);
         } else {
-            listener.onStatus("nperf aún inicializando; sin recargar la página...");
-            inspect(token, 3000L);
+            listener.onStatus("nperf aún preparando el motor; sin recargar...");
+            inspect(token, 2500L);
         }
 
         Log.w(TAG, "No actionable target. state=" + state + " scan=" + scanCount);
@@ -182,12 +232,29 @@ final class NperfAutomation {
         listener.onManualStartAvailable();
     }
 
+    private void dispatchEnter(int token, Runnable after) {
+        if (!isActive(token)) return;
+        webView.post(() -> {
+            if (!isActive(token)) return;
+            webView.requestFocus(View.FOCUS_DOWN);
+            long now = SystemClock.uptimeMillis();
+            KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_ENTER, 0);
+            KeyEvent up = new KeyEvent(now, SystemClock.uptimeMillis(),
+                KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER, 0);
+            webView.dispatchKeyEvent(down);
+            webView.dispatchKeyEvent(up);
+            Log.i(TAG, "Native ENTER dispatched");
+            if (after != null) handler.postDelayed(after, 180L);
+        });
+    }
+
     private void tapCssPoint(int token, float cssX, float cssY,
             float viewportWidth, float viewportHeight, Runnable afterTap) {
         if (!isActive(token)) return;
         if (cssX <= 0 || cssY <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
-            Log.w(TAG, "Invalid CSS point; using normalized fallback");
-            tapNormalized(token, 0.50f, 0.52f, afterTap);
+            Log.w(TAG, "Invalid CSS point; using visual fallback");
+            tapNormalized(token, 0.50f, 0.39f, afterTap);
             return;
         }
 
@@ -223,6 +290,7 @@ final class NperfAutomation {
         MotionEvent down = MotionEvent.obtain(
             downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0);
         down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        down.setPressure(1f);
         webView.dispatchTouchEvent(down);
         down.recycle();
 
@@ -232,10 +300,11 @@ final class NperfAutomation {
             MotionEvent up = MotionEvent.obtain(
                 downTime, upTime, MotionEvent.ACTION_UP, x, y, 0);
             up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+            up.setPressure(1f);
             webView.dispatchTouchEvent(up);
             up.recycle();
-            if (afterTap != null) handler.postDelayed(afterTap, 300L);
-        }, 140L);
+            if (afterTap != null) handler.postDelayed(afterTap, 280L);
+        }, 110L);
     }
 
     private JSONObject parseJavascriptObject(String value) {
@@ -253,8 +322,9 @@ final class NperfAutomation {
 
     private String buildInspectionScript() {
         return "(function(){try{" +
-            "var VW=window.innerWidth||document.documentElement.clientWidth||1;" +
-            "var VH=window.innerHeight||document.documentElement.clientHeight||1;" +
+            "var vv=window.visualViewport;" +
+            "var VW=(vv&&vv.width)||window.innerWidth||document.documentElement.clientWidth||1;" +
+            "var VH=(vv&&vv.height)||window.innerHeight||document.documentElement.clientHeight||1;" +
             "function visible(e){if(!e)return false;var r=e.getBoundingClientRect();" +
             "var s=(e.ownerDocument.defaultView||window).getComputedStyle(e);" +
             "return r.width>16&&r.height>12&&r.bottom>0&&r.right>0&&r.top<VH&&r.left<VW" +
@@ -263,18 +333,23 @@ final class NperfAutomation {
             "e.getAttribute('title')||'').replace(/\\s+/g,' ').trim().toLowerCase();}" +
             "function point(e,ox,oy){var r=e.getBoundingClientRect();return {x:ox+r.left+r.width/2," +
             "y:oy+r.top+r.height/2};}" +
-            "function result(state,kind,p){return {state:state,kind:kind||'',x:p?p.x:-1,y:p?p.y:-1," +
-            "vw:VW,vh:VH};}" +
+            "function result(state,kind,p,message){return {state:state,kind:kind||''," +
+            "x:p?p.x:-1,y:p?p.y:-1,vw:VW,vh:VH,message:message||''};}" +
             "function scan(d,ox,oy){if(!d||!d.body)return null;" +
             "var body=(d.body.innerText||'').toLowerCase();" +
+            "var failures=['no fue posible inicializar','no se pudo inicializar'," +
+            "'error al inicializar','unable to initialize','could not initialize'," +
+            "'initialization failed','impossible d inicialiser'];" +
+            "for(var f=0;f<failures.length;f++){if(body.indexOf(failures[f])>-1)" +
+            "return result('engine_error','',null,failures[f]);}" +
             "var nodes=d.querySelectorAll('button,a,[role=button],input[type=button]," +
             "input[type=submit],div,span');" +
             "var cookie=body.indexOf('política de uso de cookies')>-1||" +
             "body.indexOf('politica de uso de cookies')>-1||body.indexOf('cookie policy')>-1||" +
             "body.indexOf('uso de cookies y privacidad')>-1;" +
             "if(cookie){for(var i=0;i<nodes.length;i++){var c=nodes[i],ct=label(c);" +
-            "if(visible(c)&&(ct==='ok'||ct==='aceptar'||ct==='accept'||ct==='agree'))" +
-            "return result('consent','button',point(c,ox,oy));}}" +
+            "if(visible(c)&&(ct==='ok'||ct==='aceptar'||ct==='accept'||ct==='agree')){" +
+            "try{c.focus();}catch(ignore){}return result('consent','button',point(c,ox,oy));}}}" +
             "var words=['iniciar test','iniciar prueba','comenzar test','start test','lancer le test'];" +
             "var best=null,bestArea=1e20;" +
             "for(var j=0;j<nodes.length;j++){var n=nodes[j];if(!visible(n))continue;var t=label(n);" +
@@ -282,17 +357,22 @@ final class NperfAutomation {
             "if(t===words[w]||t.indexOf(words[w])>-1){match=true;break;}}" +
             "if(match){var nr=n.getBoundingClientRect(),area=nr.width*nr.height;" +
             "if(area>0&&area<bestArea){best=n;bestArea=area;}}}" +
-            "if(best)return result('start','button',point(best,ox,oy));" +
+            "if(best){try{best.setAttribute('tabindex','0');best.focus();}catch(ignore){}" +
+            "return result('start','button',point(best,ox,oy));}" +
             "var canvases=d.querySelectorAll('canvas'),canvas=null,canvasArea=0;" +
             "for(var k=0;k<canvases.length;k++){var cv=canvases[k],cr=cv.getBoundingClientRect();" +
             "var ca=cr.width*cr.height;if(visible(cv)&&cr.width>130&&cr.height>130&&ca>canvasArea){" +
             "canvas=cv;canvasArea=ca;}}" +
             "if(canvas)return result('canvas','canvas',point(canvas,ox,oy));" +
+            "if(body.indexOf('inicializando')>-1||body.indexOf('initializing')>-1)" +
+            "return result('initializing','',null);" +
             "return null;}" +
             "var r=scan(document,0,0);if(r)return JSON.stringify(r);" +
-            "var fs=document.querySelectorAll('iframe');for(var f=0;f<fs.length;f++){try{" +
-            "var fr=fs[f].getBoundingClientRect();r=scan(fs[f].contentDocument,fr.left,fr.top);" +
-            "if(r)return JSON.stringify(r);}catch(ignore){}}" +
+            "var fs=document.querySelectorAll('iframe');for(var q=0;q<fs.length;q++){try{" +
+            "var fr=fs[q].getBoundingClientRect();r=scan(fs[q].contentDocument,fr.left,fr.top);" +
+            "if(r)return JSON.stringify(r);}catch(ignore){" +
+            "if(visible(fs[q]))return JSON.stringify(result('canvas','iframe'," +
+            "point(fs[q],0,0)));}}" +
             "return JSON.stringify(result('none','',null));" +
             "}catch(e){return JSON.stringify({state:'error',message:String(e)," +
             "vw:window.innerWidth||1,vh:window.innerHeight||1});}})()";
