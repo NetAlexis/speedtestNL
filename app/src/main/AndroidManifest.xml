@@ -24,6 +24,12 @@
         android:usesCleartextTraffic="false">
 
         <activity
+            android:name=".NperfGeckoActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="stateUnspecified|adjustResize" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="portrait"
