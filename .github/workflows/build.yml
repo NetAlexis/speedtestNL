@@ -28,13 +28,18 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Set up Gradle 8.4
+      - name: Install Android API 37
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-37" "build-tools;36.0.0"
+
+      - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.4'
+          gradle-version: '9.3.1'
 
       - name: Generate Gradle wrapper
-        run: gradle wrapper --gradle-version 8.4
+        run: gradle wrapper --gradle-version 9.3.1
 
       - name: Grant execute permission
         run: chmod +x gradlew
@@ -45,10 +50,10 @@ jobs:
       - name: Build release APK
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Upload APK
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: SpeedtestNL-release
+          name: SpeedtestNL-GeckoView-release
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 30
@@ -57,7 +62,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: SpeedtestNL-lint
+          name: SpeedtestNL-GeckoView-lint
           path: app/build/reports/lint-results-release.html
           if-no-files-found: ignore
           retention-days: 14
