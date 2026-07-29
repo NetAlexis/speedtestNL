@@ -101,7 +101,7 @@ final class NperfAutomation {
                     case "consent":
                         listener.onStatus("Aceptando cookies nperf...");
                         activateTarget(token, x, y, viewportWidth, viewportHeight,
-                            true, false, () -> inspect(token, 1100L));
+                            true, true, () -> inspect(token, 1100L));
                         break;
 
                     case "start":
@@ -142,9 +142,8 @@ final class NperfAutomation {
         if (!isActive(token)) return;
 
         if (startActivationCount >= MAX_START_ACTIVATIONS) {
-            notifyPollingOnce();
-            showManualNoticeOnce();
-            inspect(token, 7000L);
+            generation++;
+            listener.onEngineError("nPerf no respondió a las activaciones de Iniciar test");
             return;
         }
 
@@ -210,8 +209,8 @@ final class NperfAutomation {
 
         notifyPollingOnce();
         if (scanCount >= MAX_ACTIVE_SCANS) {
-            showManualNoticeOnce();
-            inspect(token, 8000L);
+            generation++;
+            listener.onEngineError("nPerf no presentó un control de inicio operativo");
         } else {
             listener.onStatus("nperf aún preparando el motor; sin recargar...");
             inspect(token, 2500L);
@@ -357,13 +356,13 @@ final class NperfAutomation {
             "if(area>0&&area<bestArea){best=n;bestArea=area;}}}" +
             "if(best){try{best.setAttribute('tabindex','0');best.focus();}catch(ignore){}" +
             "return result('start','button',point(best,ox,oy));}" +
+            "if(body.indexOf('inicializando')>-1||body.indexOf('initializing')>-1)" +
+            "return result('initializing','',null);" +
             "var canvases=d.querySelectorAll('canvas'),canvas=null,canvasArea=0;" +
             "for(var k=0;k<canvases.length;k++){var cv=canvases[k],cr=cv.getBoundingClientRect();" +
             "var ca=cr.width*cr.height;if(visible(cv)&&cr.width>130&&cr.height>130&&ca>canvasArea){" +
             "canvas=cv;canvasArea=ca;}}" +
             "if(canvas)return result('canvas','canvas',point(canvas,ox,oy));" +
-            "if(body.indexOf('inicializando')>-1||body.indexOf('initializing')>-1)" +
-            "return result('initializing','',null);" +
             "return null;}" +
             "var r=scan(document,0,0);if(r)return JSON.stringify(r);" +
             "var fs=document.querySelectorAll('iframe');for(var q=0;q<fs.length;q++){try{" +
