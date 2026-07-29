@@ -290,7 +290,6 @@ final class NperfAutomation {
         MotionEvent down = MotionEvent.obtain(
             downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0);
         down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-        down.setPressure(1f);
         webView.dispatchTouchEvent(down);
         down.recycle();
 
@@ -300,7 +299,6 @@ final class NperfAutomation {
             MotionEvent up = MotionEvent.obtain(
                 downTime, upTime, MotionEvent.ACTION_UP, x, y, 0);
             up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-            up.setPressure(1f);
             webView.dispatchTouchEvent(up);
             up.recycle();
             if (afterTap != null) handler.postDelayed(afterTap, 280L);
