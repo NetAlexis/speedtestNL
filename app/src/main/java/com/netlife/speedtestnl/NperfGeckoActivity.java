@@ -17,6 +17,7 @@ import android.view.WindowManager;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
@@ -109,6 +110,15 @@ public class NperfGeckoActivity extends AppCompatActivity {
         jitterView = findViewById(R.id.tvNperfGeckoJitter);
         progressBar = findViewById(R.id.progressNperfGecko);
 
+        getOnBackPressedDispatcher().addCallback(this,
+            new OnBackPressedCallback(true) {
+                @Override
+                public void handleOnBackPressed() {
+                    fail("USER_CANCELLED",
+                        "La prueba nPerf fue cancelada por el usuario");
+                }
+            });
+
         Intent source = getIntent();
         runNumber = Math.max(1, source.getIntExtra(EXTRA_RUN, 1));
         totalRuns = Math.max(1, source.getIntExtra(EXTRA_TOTAL_RUNS, 1));
@@ -160,19 +170,19 @@ public class NperfGeckoActivity extends AppCompatActivity {
             runtime.getWebExtensionController()
                 .ensureBuiltIn(EXTENSION_URI, EXTENSION_ID)
                 .accept(
-                    extension -> {
-                        if (finished) return;
+                    extension -> handler.post(() -> {
+                        if (finished || session == null) return;
                         session.getWebExtensionController().setMessageDelegate(
                             extension, messageDelegate, NATIVE_APP);
                         requestLocationPermissionProactively();
                         setStatus("Cargando nPerf en GeckoView...");
                         session.loadUri(NPERF_URL);
-                    },
-                    error -> fail(
+                    }),
+                    error -> handler.post(() -> fail(
                         "EXTENSION_INSTALL",
                         "No se pudo instalar la automatización nPerf: " +
                             safeMessage(error)
-                    )
+                    ))
                 );
         } catch (Throwable error) {
             fail("GECKO_INITIALIZATION",
@@ -560,8 +570,4 @@ public class NperfGeckoActivity extends AppCompatActivity {
         super.onDestroy();
     }
 
-    @Override
-    public void onBackPressed() {
-        fail("USER_CANCELLED", "La prueba nPerf fue cancelada por el usuario");
-    }
 }
