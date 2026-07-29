@@ -12,6 +12,16 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0"
+
+        // Application-owned adapter that will wrap the proprietary nPerf AAR.
+        // The class is loaded reflectively so the public build remains valid
+        // until nPerf supplies the licensed binary and Android API guide.
+        buildConfigField "String", "NPERF_SDK_ADAPTER_CLASS",
+            '"com.netlife.speedtestnl.nperf.NperfVendorAdapter"'
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     buildTypes {
@@ -28,7 +38,16 @@ android {
     }
 }
 
+def nperfSdkLibraries = fileTree(
+    dir: 'libs/nperf',
+    include: ['*.aar', '*.jar']
+)
+
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
+
+    // nPerf distributes the Engine SDK privately. Place the licensed AAR/JAR
+    // under app/libs/nperf; no proprietary binary is committed to this repo.
+    implementation nperfSdkLibraries
 }

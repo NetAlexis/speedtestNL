@@ -34,6 +34,9 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.netlife.speedtestnl.nperf.NperfEngine;
+import com.netlife.speedtestnl.nperf.NperfEngineLoader;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileWriter;
@@ -121,6 +124,7 @@ public class MainActivity extends AppCompatActivity {
     private PowerManager.WakeLock wakeLock;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private NperfAutomation nperfAutomation;
+    private NperfEngine nperfEngine;
     private int nperfPollingSession = 0;
     private int nperfCompatibilityAttempt = 0;
     private String nperfEngineDiagnostic = "";
@@ -160,7 +164,7 @@ public class MainActivity extends AppCompatActivity {
         acquireWakeLock();
         requestPerms();
         setupWebView();
-        setupNperfAutomation();
+        nperfEngine = NperfEngineLoader.load(this);
         startForegroundService();
 
         setStatus("Cargando configuracion...");
@@ -242,6 +246,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         if (nperfAutomation != null) nperfAutomation.cancel();
+        if (nperfEngine != null) {
+            nperfEngine.cancel();
+            nperfEngine.release();
+        }
         nperfPollingSession++;
         super.onDestroy();
         releaseWakeLock();
@@ -378,6 +386,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void resetState() {
+        if (nperfEngine != null) nperfEngine.cancel();
         resultId = ""; resultUrl = ""; download = ""; upload = "";
         ping = ""; jitter = ""; pageLoaded = false;
         goPressed = false; pollCount = 0;
@@ -1116,6 +1125,182 @@ public class MainActivity extends AppCompatActivity {
 
 
 
+    // ══════════════════════════════════════════════════════════════════════
+    // NPERF ENGINE SDK — flujo nativo (sin WebView)
+    // ══════════════════════════════════════════════════════════════════════
+    private void startNperfNative() {
+        if (!"nperf".equals(phase) || nSaved.get() || finalSaveStarted.get()) return;
+        if (!isWifiConnected()) { showNoWifiDialog(this::startNperfNative); return; }
+        if (!isConnected()) { showNoInternetDialog(this::startNperfNative); return; }
+
+        if (nperfEngine == null) nperfEngine = NperfEngineLoader.load(this);
+        if (!nperfEngine.isAvailable()) {
+            showNperfSdkUnavailable(nperfEngine.getUnavailableReason());
+            return;
+        }
+
+        if (nperfAutomation != null) nperfAutomation.cancel();
+        nperfPollingSession++;
+        nperfPollingStarted.set(false);
+        nErrorDetected.set(false);
+        nSaved.set(false);
+        nDownload = ""; nUpload = ""; nPing = ""; nJitter = "";
+        nServer = ""; nOperator = ""; nResultId = ""; nResultUrl = "";
+
+        if (webView != null) {
+            webView.stopLoading();
+            webView.setVisibility(View.GONE);
+        }
+        progressBar.setVisibility(View.VISIBLE);
+        layoutResults.setVisibility(View.VISIBLE);
+        tvResultId.setText("nPerf SDK — preparando...");
+        tvDownload.setText("-");
+        tvUpload.setText("-");
+        tvPing.setText("-");
+        tvJitter.setText("-");
+        setStatus("Iniciando nPerf Engine SDK...");
+        SpeedtestService.update(this,
+            "Iniciando nPerf SDK - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+
+        NperfEngine.Request request = new NperfEngine.Request(
+            currentRun,
+            totalRuns,
+            360,
+            true,
+            "SpeedtestNL-run-" + currentRun
+        );
+
+        nperfEngine.start(request, new NperfEngine.Listener() {
+            @Override
+            public void onState(NperfEngine.State state, String message) {
+                handler.post(() -> {
+                    if (!"nperf".equals(phase) || nSaved.get()) return;
+                    String detail = message == null || message.trim().isEmpty()
+                        ? nativeNperfStateLabel(state) : message.trim();
+                    String status = "nPerf SDK: " + detail;
+                    setStatus(status);
+                    SpeedtestService.update(MainActivity.this, status,
+                        "Prueba " + currentRun + " de " + totalRuns);
+                });
+            }
+
+            @Override
+            public void onMetric(NperfEngine.Metric metric, double value) {
+                handler.post(() -> updateNativeNperfMetric(metric, value));
+            }
+
+            @Override
+            public void onComplete(NperfEngine.Result result) {
+                handler.post(() -> completeNativeNperf(result));
+            }
+
+            @Override
+            public void onError(String code, String message, Throwable cause) {
+                handler.post(() -> {
+                    if (!"nperf".equals(phase) || nSaved.get()) return;
+                    String detail = message == null || message.trim().isEmpty()
+                        ? "error no especificado" : message.trim();
+                    setStatus("Error nPerf SDK: " + detail);
+                    SpeedtestService.update(MainActivity.this,
+                        "Error nPerf SDK - prueba " + currentRun,
+                        "Prueba " + currentRun + " de " + totalRuns);
+                    if ("SDK_NOT_AVAILABLE".equals(code)) {
+                        showNperfSdkUnavailable(detail);
+                    } else {
+                        retryNperf();
+                    }
+                });
+            }
+        });
+    }
+
+    private String nativeNperfStateLabel(NperfEngine.State state) {
+        if (state == null) return "procesando";
+        switch (state) {
+            case PREPARING: return "preparando motor";
+            case SELECTING_SERVER: return "seleccionando servidor";
+            case LATENCY: return "midiendo latencia";
+            case DOWNLOAD: return "midiendo descarga";
+            case UPLOAD: return "midiendo subida";
+            case FINALIZING: return "finalizando resultado";
+            default: return "procesando";
+        }
+    }
+
+    private void updateNativeNperfMetric(NperfEngine.Metric metric, double value) {
+        if (!"nperf".equals(phase) || nSaved.get() || metric == null ||
+                Double.isNaN(value) || Double.isInfinite(value) || value < 0) return;
+        String formatted = formatNativeMetric(value);
+        switch (metric) {
+            case DOWNLOAD_MBPS:
+                nDownload = formatted;
+                break;
+            case UPLOAD_MBPS:
+                nUpload = formatted;
+                break;
+            case LATENCY_MS:
+                nPing = formatted;
+                break;
+            case JITTER_MS:
+                nJitter = formatted;
+                break;
+        }
+        showPanel();
+    }
+
+    private void completeNativeNperf(NperfEngine.Result result) {
+        if (!"nperf".equals(phase) || result == null ||
+                !nSaved.compareAndSet(false, true)) return;
+
+        nDownload = formatNativeMetric(result.downloadMbps);
+        nUpload = formatNativeMetric(result.uploadMbps);
+        nPing = formatNativeMetric(result.latencyMs);
+        nJitter = formatNativeMetric(result.jitterMs);
+        nServer = result.server;
+        nOperator = result.operator;
+        nResultId = result.resultId;
+        nResultUrl = result.resultUrl;
+
+        progressBar.setVisibility(View.GONE);
+        showPanel();
+        setStatus("nPerf SDK completado. Guardando...");
+        SpeedtestService.update(this,
+            "nPerf SDK completado - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+        handler.postDelayed(this::saveTxt, 1000L);
+    }
+
+    private String formatNativeMetric(double value) {
+        if (Double.isNaN(value) || Double.isInfinite(value) || value < 0) return "";
+        String formatted = String.format(Locale.US, "%.2f", value);
+        return formatted.replaceAll("\\.?0+$", "");
+    }
+
+    private void showNperfSdkUnavailable(String reason) {
+        if (!"nperf".equals(phase)) return;
+        if (nperfEngine != null) nperfEngine.cancel();
+        progressBar.setVisibility(View.GONE);
+        isRunning = false;
+        releaseWakeLock();
+        SpeedtestService.stop(this);
+
+        String detail = reason == null || reason.trim().isEmpty()
+            ? "Falta el SDK privado de nPerf." : reason.trim();
+        setStatus("nPerf SDK pendiente: " + detail);
+
+        new AlertDialog.Builder(this)
+            .setTitle("nPerf Engine SDK requerido")
+            .setMessage(
+                "Speedtest terminó correctamente, pero la medición nPerf nativa " +
+                "no puede ejecutarse hasta instalar el AAR autorizado y su " +
+                "documentación de integración.\n\n" + detail +
+                "\n\nNo se generó un resultado combinado incompleto.")
+            .setPositiveButton("Entendido", null)
+            .setCancelable(false)
+            .show();
+    }
+
     private void setupNperfAutomation() {
         nperfAutomation = new NperfAutomation(webView, handler,
             new NperfAutomation.Listener() {
@@ -1598,6 +1783,7 @@ public class MainActivity extends AppCompatActivity {
         errorDetected.set(false);
         setSpeedtestUserAgent();
         clearWebViewSession(false);
+        webView.setVisibility(View.VISIBLE);
         webView.loadUrl(SPEEDTEST_URL);
         progressBar.setVisibility(View.VISIBLE);
         layoutResults.setVisibility(View.GONE);
@@ -1633,13 +1819,13 @@ public class MainActivity extends AppCompatActivity {
         SpeedtestService.update(this,
             "Iniciando nperf - prueba " + currentRun,
             "Prueba " + currentRun + " de " + totalRuns);
-        handler.postDelayed(this::startNperf, 2000);
+        handler.postDelayed(this::startNperfNative, 1000);
     }
 
     private void resumeCurrentPhaseAfterConnection() {
         if ("nperf".equals(phase)) {
             nErrorDetected.set(false);
-            handler.postDelayed(this::startNperf, 1000);
+            handler.postDelayed(this::startNperfNative, 1000);
         } else {
             errorDetected.set(false);
             handler.postDelayed(this::reloadSpeedtestCurrentAttempt, 1000);
@@ -1655,7 +1841,7 @@ public class MainActivity extends AppCompatActivity {
             SpeedtestService.update(this,
                 "Reintentando nperf - prueba " + currentRun,
                 "Prueba " + currentRun + " de " + totalRuns);
-            handler.postDelayed(this::startNperf, 3000);
+            handler.postDelayed(this::startNperfNative, 3000);
         } else {
             showErrorDialog();
         }

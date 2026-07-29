@@ -16,6 +16,11 @@ captures/
 *.keystore
 keystore.properties
 
+# Proprietary nPerf Engine SDK
+app/libs/nperf/*.aar
+app/libs/nperf/*.jar
+!app/libs/nperf/README.md
+
 # Generated artifacts
 *.apk
 *.aab
