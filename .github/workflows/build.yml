@@ -19,6 +19,19 @@ jobs:
           ref: agent/stabilize-speedtest-nperf
           fetch-depth: 0
 
+      - name: Normalize inherited comment marker
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/harden_nperf_results.py')
+          text = path.read_text(encoding='utf-8')
+          old = "helper_marker = '    // ── Polling nperf cada 3s ─────────────────────────────────────────────\\n'"
+          new = "helper_marker = '// ── Polling nperf cada 3s ─────────────────────────────────────────────\\n'"
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one helper marker, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
       - name: Apply guarded correction
         run: python scripts/harden_nperf_results.py
 
