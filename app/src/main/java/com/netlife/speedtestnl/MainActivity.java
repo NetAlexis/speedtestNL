@@ -119,12 +119,14 @@ public class MainActivity extends AppCompatActivity {
 
     private PowerManager.WakeLock wakeLock;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private NperfAutomation nperfAutomation;
+    private int nperfPollingSession = 0;
     private static final int PERM_REQ       = 100;
     private static final int PERM_REQ_NOTIF = 101;
     private static final int MAX_POLL       = 120; // 6 minutos
 
     private static final String SPEEDTEST_URL = "https://www.speedtest.net/en";
-    private static final String NPERF_URL = "https://www.nperf.com/es/";
+    private static final String NPERF_URL = "https://www.nperf.com/es/index";
     private static final String SPEEDTEST_USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
         "AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -155,6 +157,7 @@ public class MainActivity extends AppCompatActivity {
         acquireWakeLock();
         requestPerms();
         setupWebView();
+        setupNperfAutomation();
         startForegroundService();
 
         setStatus("Cargando configuracion...");
@@ -235,6 +238,8 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        if (nperfAutomation != null) nperfAutomation.cancel();
+        nperfPollingSession++;
         super.onDestroy();
         releaseWakeLock();
     }
@@ -686,7 +691,7 @@ public class MainActivity extends AppCompatActivity {
                         handler.postDelayed(MainActivity.this::pressGo, 5000);
                     } else if (phase.equals("nperf") && !nPageLoaded && !nGoPressed) {
                         nPageLoaded = true;
-                        handler.postDelayed(MainActivity.this::pressNperfGo, 8000);
+                        handler.postDelayed(MainActivity.this::pressNperfGo, 2500);
                     }
                 }
             }
@@ -1075,6 +1080,36 @@ public class MainActivity extends AppCompatActivity {
 
 
 
+    private void setupNperfAutomation() {
+        nperfAutomation = new NperfAutomation(webView, handler,
+            new NperfAutomation.Listener() {
+                @Override
+                public void onStatus(String message) {
+                    if ("nperf".equals(phase) && !nSaved.get()) setStatus(message);
+                }
+
+                @Override
+                public void onStartTouchSent() {
+                    if (!"nperf".equals(phase) || nSaved.get()) return;
+                    setStatus("nperf: toque enviado; esperando respuesta...");
+                    SpeedtestService.update(MainActivity.this,
+                        "nperf esperando resultados - prueba " + currentRun,
+                        "Prueba " + currentRun + " de " + totalRuns);
+                    startNperfPolling();
+                }
+
+                @Override
+                public void onManualStartAvailable() {
+                    if (!"nperf".equals(phase) || nSaved.get()) return;
+                    setStatus("nperf no inició automáticamente. Puede tocar Iniciar test; no se recargará.");
+                    SpeedtestService.update(MainActivity.this,
+                        "nperf esperando inicio manual - prueba " + currentRun,
+                        "Prueba " + currentRun + " de " + totalRuns);
+                    startNperfPolling();
+                }
+            });
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // NPERF — Iniciar prueba
     // ══════════════════════════════════════════════════════════════════════
@@ -1082,6 +1117,8 @@ public class MainActivity extends AppCompatActivity {
         if (!isWifiConnected()) { showNoWifiDialog(); return; }
         if (!isConnected())     { showNoInternetDialog(); return; }
 
+        if (nperfAutomation != null) nperfAutomation.cancel();
+        nperfPollingSession++;
         nGoPressed = false; nPageLoaded = false; nPollCount = 0;
         nDownload = ""; nUpload = ""; nPing = ""; nJitter = "";
         nServer = ""; nOperator = ""; nResultId = ""; nResultUrl = "";
@@ -1108,187 +1145,21 @@ public class MainActivity extends AppCompatActivity {
     private void pressNperfGo() {
         if (nGoPressed || nSaved.get()) return;
 
-        String curUrl = webView.getUrl();
+        String curUrl = webView == null ? null : webView.getUrl();
         if (curUrl == null || !curUrl.contains("nperf.com")) {
-            setStatus("Reintentando cargar nperf...");
-            handler.postDelayed(this::startNperf, 3000);
+            setStatus("nperf todavía cargando; esperando sin recargar...");
+            handler.postDelayed(this::pressNperfGo, 1500);
             return;
         }
 
         nGoPressed = true;
-        setStatus("Analizando banners nperf...");
-
-        // Iniciar flujo nperf directamente
-        runNperfAfterDebug();
-    }
-
-    private void runNperfAfterDebug() {
-        dismissNperfConsentThenStart(1);
-    }
-
-    private void dismissNperfConsentThenStart(int attempt) {
-        if (!"nperf".equals(phase) || nSaved.get() || webView == null) return;
-        setStatus("Revisando consentimiento nperf...");
-
-        String jsConsent = "(function(){try{" +
-            "function visible(e){if(!e)return false;var r=e.getBoundingClientRect();" +
-            "var s=(e.ownerDocument.defaultView||window).getComputedStyle(e);" +
-            "return r.width>20&&r.height>15&&s.display!=='none'&&s.visibility!=='hidden';}" +
-            "function point(e,ox,oy){var r=e.getBoundingClientRect();" +
-            "return {x:ox+r.left+r.width/2,y:oy+r.top+r.height/2};}" +
-            "function scan(d,ox,oy){if(!d||!d.body)return null;" +
-            "var body=(d.body.innerText||'').toLowerCase();" +
-            "var cookie=body.indexOf('política de uso de cookies')>-1||" +
-            "body.indexOf('politica de uso de cookies')>-1||" +
-            "body.indexOf('cookie policy')>-1;" +
-            "if(!cookie)return null;" +
-            "var ns=d.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]');" +
-            "for(var i=0;i<ns.length;i++){var n=ns[i];" +
-            "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'').trim().toLowerCase();" +
-            "if(visible(n)&&(t==='ok'||t==='aceptar'||t==='accept'||t==='agree')){" +
-            "var p=point(n,ox,oy);" +
-            "return {state:'consent',x:p.x,y:p.y};}}return null;}" +
-            "var r=scan(document,0,0);if(r)return JSON.stringify(r);" +
-            "var fs=document.querySelectorAll('iframe');" +
-            "for(var f=0;f<fs.length;f++){try{var fr=fs[f].getBoundingClientRect();" +
-            "r=scan(fs[f].contentDocument,fr.left,fr.top);if(r)return JSON.stringify(r);}catch(x){}}" +
-            "return JSON.stringify({state:'none'});" +
-            "}catch(e){return JSON.stringify({state:'error'});}})()";
-
-        webView.evaluateJavascript(jsConsent, value -> {
-            if (!"nperf".equals(phase) || nSaved.get()) return;
-            String json = decodeJsResult(value);
-            if ("consent".equals(key(json, "state"))) {
-                float x = parseFloatSafe(key(json, "x"));
-                float y = parseFloatSafe(key(json, "y"));
-                setStatus("Aceptando cookies nperf...");
-                tapWebViewCssPoint(x, y,
-                    () -> handler.postDelayed(() -> attemptNperfStart(attempt), 1600));
-            } else {
-                attemptNperfStart(attempt);
-            }
-        });
-    }
-
-    private void attemptNperfStart(int attempt) {
-        if (!"nperf".equals(phase) || nSaved.get() || webView == null) return;
-        setStatus("Buscando inicio nperf (" + attempt + "/8)...");
-
-        String jsStart = "(function(){try{" +
-            "function visible(e){if(!e)return false;var r=e.getBoundingClientRect();" +
-            "var s=(e.ownerDocument.defaultView||window).getComputedStyle(e);" +
-            "return r.width>20&&r.height>20&&s.display!=='none'&&s.visibility!=='hidden';}" +
-            "function point(e,ox,oy){var r=e.getBoundingClientRect();" +
-            "return {x:ox+r.left+r.width/2,y:oy+r.top+r.height/2};}" +
-            "function scan(d,ox,oy){if(!d)return null;" +
-            "var nodes=d.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit],div,span');" +
-            "var words=['iniciar test','iniciar prueba','comenzar test','start test','lancer le test'];" +
-            "var bestNode=null,bestArea=1e20;" +
-            "for(var i=0;i<nodes.length;i++){var n=nodes[i];if(!visible(n))continue;" +
-            "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'').trim().toLowerCase();" +
-            "if(t.length>80)continue;var match=false;" +
-            "for(var w=0;w<words.length;w++){if(t===words[w]||t.indexOf(words[w])>-1){match=true;break;}}" +
-            "if(match){var nr=n.getBoundingClientRect(),area=nr.width*nr.height;" +
-            "if(area>0&&area<bestArea){bestNode=n;bestArea=area;}}}" +
-            "if(bestNode){var p=point(bestNode,ox,oy);" +
-            "return {state:'target',kind:'button',x:p.x,y:p.y};}" +
-            "var cs=d.querySelectorAll('canvas');var best=null,bestArea=0;" +
-            "for(var c=0;c<cs.length;c++){var cv=cs[c],cr=cv.getBoundingClientRect();" +
-            "var area=cr.width*cr.height;if(visible(cv)&&cr.width>140&&cr.height>140&&area>bestArea){" +
-            "best=cv;bestArea=area;}}" +
-            "if(best){var p=point(best,ox,oy);return {state:'target',kind:'canvas',x:p.x,y:p.y};}" +
-            "return null;}" +
-            "var r=scan(document,0,0);if(r)return JSON.stringify(r);" +
-            "var fs=document.querySelectorAll('iframe');" +
-            "for(var f=0;f<fs.length;f++){try{var fr=fs[f].getBoundingClientRect();" +
-            "r=scan(fs[f].contentDocument,fr.left,fr.top);if(r)return JSON.stringify(r);}catch(x){}}" +
-            "var body=(document.body?document.body.innerText:'').toLowerCase();" +
-            "if(body.indexOf('política de uso de cookies')>-1||body.indexOf('politica de uso de cookies')>-1)" +
-            "return JSON.stringify({state:'consent'});" +
-            "return JSON.stringify({state:'none'});" +
-            "}catch(e){return JSON.stringify({state:'error'});}})()";
-
-        webView.evaluateJavascript(jsStart, value -> {
-            if (!"nperf".equals(phase) || nSaved.get()) return;
-            String json = decodeJsResult(value);
-            String state = key(json, "state");
-            if ("consent".equals(state)) {
-                dismissNperfConsentThenStart(attempt);
-                return;
-            }
-            if ("target".equals(state)) {
-                float x = parseFloatSafe(key(json, "x"));
-                float y = parseFloatSafe(key(json, "y"));
-                String kind = key(json, "kind");
-                setStatus("Toque Android sobre nperf (" + kind + ")...");
-                tapWebViewCssPoint(x, y, () -> {
-                    setStatus("nperf iniciado. Esperando resultados...");
-                    SpeedtestService.update(MainActivity.this,
-                        "nperf en curso - prueba " + currentRun,
-                        "Prueba " + currentRun + " de " + totalRuns);
-                    startNperfPolling();
-                    scheduleNperfStartRetap(x, y, 1);
-                });
-            } else if (attempt < 8) {
-                setStatus("nperf aún inicializando. Nuevo intento...");
-                handler.postDelayed(() -> dismissNperfConsentThenStart(attempt + 1), 2500);
-            } else {
-                nGoPressed = false;
-                setStatus("No se encontró el inicio de nperf. Reintentando carga...");
-                handler.postDelayed(this::retryNperf, 2000);
-            }
-        });
-    }
-
-    private void scheduleNperfStartRetap(float cssX, float cssY, int retap) {
-        handler.postDelayed(() -> {
-            if (!"nperf".equals(phase) || nSaved.get()) return;
-            boolean hasMetrics = !nDownload.isEmpty() || !nUpload.isEmpty() || !nPing.isEmpty();
-            if (hasMetrics || retap > 1) return;
-            setStatus("Confirmando inicio nperf con segundo toque...");
-            tapWebViewCssPoint(cssX, cssY,
-                () -> scheduleNperfStartRetap(cssX, cssY, retap + 1));
-        }, 12000);
-    }
-
-    @SuppressWarnings("deprecation")
-    private void tapWebViewCssPoint(float cssX, float cssY, Runnable afterTap) {
-        if (webView == null || cssX <= 0 || cssY <= 0) {
-            if (afterTap != null) afterTap.run();
-            return;
+        setStatus("Preparando automatización nperf...");
+        if (nperfAutomation != null) {
+            nperfAutomation.begin();
+        } else {
+            nGoPressed = false;
+            setStatus("Controlador nperf no disponible.");
         }
-        webView.post(() -> {
-            float scale = webView.getScale();
-            if (scale <= 0) scale = 1f;
-            float x = Math.max(1f, Math.min(webView.getWidth() - 1f, cssX * scale));
-            float y = Math.max(1f, Math.min(webView.getHeight() - 1f, cssY * scale));
-            long downTime = android.os.SystemClock.uptimeMillis();
-            android.view.MotionEvent down = android.view.MotionEvent.obtain(
-                downTime, downTime, android.view.MotionEvent.ACTION_DOWN, x, y, 0);
-            down.setSource(android.view.InputDevice.SOURCE_TOUCHSCREEN);
-            webView.dispatchTouchEvent(down);
-            down.recycle();
-
-            handler.postDelayed(() -> {
-                long upTime = android.os.SystemClock.uptimeMillis();
-                android.view.MotionEvent up = android.view.MotionEvent.obtain(
-                    downTime, upTime, android.view.MotionEvent.ACTION_UP, x, y, 0);
-                up.setSource(android.view.InputDevice.SOURCE_TOUCHSCREEN);
-                webView.dispatchTouchEvent(up);
-                up.recycle();
-                if (afterTap != null) handler.postDelayed(afterTap, 250);
-            }, 120);
-        });
-    }
-
-    private String decodeJsResult(String value) {
-        if (value == null || "null".equals(value)) return "";
-        return value.replaceAll("^\\\"|\\\"$", "").replace("\\\\\\\"", "\\\"");
-    }
-
-    private float parseFloatSafe(String value) {
-        try { return Float.parseFloat(value); }
-        catch (Exception e) { return 0f; }
     }
 
     private boolean isNperfResultUrl(String url) {
@@ -1308,10 +1179,11 @@ public class MainActivity extends AppCompatActivity {
 // ── Polling nperf cada 3s ─────────────────────────────────────────────
     private void startNperfPolling() {
         if (!nperfPollingStarted.compareAndSet(false, true)) return;
+        final int pollingSession = nperfPollingSession;
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
-                if (nSaved.get()) return;
+                if (pollingSession != nperfPollingSession || nSaved.get()) return;
                 nPollCount++;
 
                 String statusTxt = "nperf prueba " + currentRun + "/" +
@@ -1376,12 +1248,16 @@ public class MainActivity extends AppCompatActivity {
                     );
                 }
 
+                if (!nSaved.get() && nPollCount == 40) {
+                    setStatus("nperf sigue sin resultados. Puede iniciar manualmente; no se recargará.");
+                }
                 if (!nSaved.get() && nPollCount >= MAX_POLL) {
-                    setStatus("Tiempo agotado en nperf. Reintentando...");
-                    retryNperf();
+                    setStatus("nperf sin respuesta. La página se mantiene abierta para inicio manual.");
+                    handler.postDelayed(this, 8000);
                     return;
                 }
-                if (!nSaved.get()) handler.postDelayed(this, 3000);
+                if (!nSaved.get() && pollingSession == nperfPollingSession)
+                    handler.postDelayed(this, 3000);
             }
         }, 8000);
     }
@@ -1558,6 +1434,8 @@ private void setNperfUserAgent() {
 
     private void reloadSpeedtestCurrentAttempt() {
         if (webView == null) return;
+        if (nperfAutomation != null) nperfAutomation.cancel();
+        nperfPollingSession++;
         phase = "speedtest";
         pageLoaded = false;
         goPressed = false;
