@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    compileSdk 34
+    compileSdk 37
     namespace 'com.netlife.speedtestnl'
 
     defaultConfig {
@@ -12,6 +12,10 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0"
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     buildTypes {
@@ -43,6 +47,5 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
 
-    // Current GeckoView nightly used by the implementation and API docs.
     implementation 'org.mozilla.geckoview:geckoview-nightly:155.0.20260728095222'
 }
