@@ -33,6 +33,18 @@ jobs:
             echo "GeckoView LNA state fix already applied"
           else
             python3 scripts/apply_gecko_lna_state_fix.py
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path('app/src/main/assets/nperf_automation/frame_controller.js')
+          text = path.read_text(encoding='utf-8')
+          broken = '}).join("\n");'
+          fixed = '}).join("\\n");'
+          if broken in text:
+              text = text.replace(broken, fixed, 1)
+              path.write_text(text, encoding='utf-8')
+          elif fixed not in text:
+              raise RuntimeError('deepRawText join expression not found')
+          PY
             node --check app/src/main/assets/nperf_automation/frame_controller.js
             git diff --check
             git config user.name "github-actions[bot]"
