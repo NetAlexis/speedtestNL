@@ -31,6 +31,8 @@ jobs:
           if grep -q 'versionName "1.3-gecko-network"' app/build.gradle; then
             echo "GeckoView network recovery already applied"
           else
+            sed -i 's/"Reintentar únicamente nPerf"/"Puede reintentar únicamente nPerf"/' \
+              scripts/apply_gecko_network_recovery.py
             python3 scripts/apply_gecko_network_recovery.py
             node --check app/src/main/assets/nperf_automation/frame_controller.js
             git diff --check
