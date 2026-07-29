@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   apply-nperf-fix:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/agent/stabilize-speedtest-nperf'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout correction branch
