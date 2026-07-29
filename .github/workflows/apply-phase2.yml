@@ -26,19 +26,31 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Apply guarded migration
-        run: python scripts/apply_phase2.py
-
-      - name: Verify intended scope
+      - name: Apply, verify and commit guarded migration
+        shell: bash
         run: |
+          set +e
+          python scripts/apply_phase2.py > /tmp/phase2.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/phase2.log
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ "$status" -ne 0 ]; then
+            cp /tmp/phase2.log scripts/phase2-error.log
+            git add scripts/phase2-error.log
+            git commit -m "Record phase 2 migration failure [skip ci]" || true
+            git push origin HEAD:agent/stabilize-speedtest-nperf
+            exit "$status"
+          fi
+
           git diff --check
           changed="$(git diff --name-only)"
           test "$changed" = "app/src/main/java/com/netlife/speedtestnl/MainActivity.java"
 
-      - name: Commit migrated MainActivity
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/src/main/java/com/netlife/speedtestnl/MainActivity.java
+          rm -f scripts/phase2-error.log
+          git add app/src/main/java/com/netlife/speedtestnl/MainActivity.java scripts/phase2-error.log
           git commit -m "Stabilize Speedtest to nPerf flow [skip ci]"
           git push origin HEAD:agent/stabilize-speedtest-nperf
