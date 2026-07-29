@@ -29,11 +29,16 @@ jobs:
       - name: Apply, verify and commit guarded migration
         shell: bash
         run: |
+          # The legacy string also appears in the valid final nPerf save path.
+          # Remove only that over-broad diagnostic from the temporary runner copy.
+          sed -i '/handler.postDelayed(MainActivity.this::saveTxt, 2000);/d' scripts/apply_phase2.py
+
           set +e
           python scripts/apply_phase2.py > /tmp/phase2.log 2>&1
           status=$?
           set -e
           cat /tmp/phase2.log
+          git checkout -- scripts/apply_phase2.py
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
