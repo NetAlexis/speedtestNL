@@ -9,6 +9,8 @@
         <domain includeSubdomains="true">speedtest.net</domain>
         <domain includeSubdomains="true">speedtest.com</domain>
         <domain includeSubdomains="true">ooklaserver.net</domain>
+        <domain includeSubdomains="true">nperf.com</domain>
+        <domain includeSubdomains="true">nperf.net</domain>
         <domain includeSubdomains="true">docs.google.com</domain>
     </domain-config>
 </network-security-config>
