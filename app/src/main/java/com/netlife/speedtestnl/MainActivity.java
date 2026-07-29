@@ -16,6 +16,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.util.Log;
 import android.provider.MediaStore;
 import android.view.View;
 import android.view.WindowManager;
@@ -121,6 +122,8 @@ public class MainActivity extends AppCompatActivity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private NperfAutomation nperfAutomation;
     private int nperfPollingSession = 0;
+    private int nperfCompatibilityAttempt = 0;
+    private String nperfEngineDiagnostic = "";
     private static final int PERM_REQ       = 100;
     private static final int PERM_REQ_NOTIF = 101;
     private static final int MAX_POLL       = 120; // 6 minutos
@@ -389,6 +392,8 @@ public class MainActivity extends AppCompatActivity {
         nperfPollingStarted.set(false);
 
         nperfRetry = 0;
+        nperfCompatibilityAttempt = 0;
+        nperfEngineDiagnostic = "";
         nperfTransitionStarted.set(false);
         finalSaveStarted.set(false);
     }
@@ -406,7 +411,7 @@ public class MainActivity extends AppCompatActivity {
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
-                if (!isRunning) {
+                if (!isRunning || !watcherRunning || !"speedtest".equals(phase)) {
                     watcherRunning = false;
                     return;
                 }
@@ -489,8 +494,11 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 // Continuar mientras la prueba esté activa
-                if (isRunning) handler.postDelayed(this, 2000);
-                else watcherRunning = false;
+                if (isRunning && watcherRunning && "speedtest".equals(phase)) {
+                    handler.postDelayed(this, 2000);
+                } else {
+                    watcherRunning = false;
+                }
             }
         }, 2000);
     }
@@ -623,9 +631,15 @@ public class MainActivity extends AppCompatActivity {
         // Riesgo mitigado: se valida dominio speedtest.net antes de inyectar JS (ver pressGo)
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
-        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        s.setDatabaseEnabled(false);
+        s.setDatabaseEnabled(true);
+        s.setCacheMode(WebSettings.LOAD_DEFAULT);
         s.setSaveFormData(false);
+        s.setLoadsImagesAutomatically(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        }
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         s.setLoadWithOverviewMode(true);
         s.setUseWideViewPort(true);
         s.setGeolocationEnabled(true);
@@ -684,6 +698,18 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) {
+                String message = consoleMessage == null ? "" : consoleMessage.message();
+                String source = consoleMessage == null ? "" : consoleMessage.sourceId();
+                int line = consoleMessage == null ? 0 : consoleMessage.lineNumber();
+                Log.d("SpeedtestNL-Web", source + ":" + line + " " + message);
+                if ("nperf".equals(phase) && isNperfEngineFailureText(message)) {
+                    handleNperfEngineFailure(message);
+                }
+                return true;
+            }
+
+            @Override
             public void onProgressChanged(WebView view, int progress) {
                 if (progress == 100) {
                     if (phase.equals("speedtest") && !pageLoaded && !goPressed) {
@@ -707,6 +733,16 @@ public class MainActivity extends AppCompatActivity {
                     captureNperfResultUrl(url);
                     if (nSaved.compareAndSet(false, true))
                         handler.postDelayed(MainActivity.this::extractNperfMetrics, 4000);
+                }
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view,
+                    android.webkit.WebResourceRequest request,
+                    android.webkit.WebResourceResponse errorResponse) {
+                if (request != null && errorResponse != null) {
+                    Log.w("SpeedtestNL-Web", "HTTP " + errorResponse.getStatusCode() +
+                        " " + request.getUrl());
                 }
             }
 
@@ -1107,7 +1143,62 @@ public class MainActivity extends AppCompatActivity {
                         "Prueba " + currentRun + " de " + totalRuns);
                     startNperfPolling();
                 }
+
+                @Override
+                public void onEngineError(String message) {
+                    handleNperfEngineFailure(message);
+                }
             });
+    }
+
+    private boolean isNperfEngineFailureText(String message) {
+        if (message == null) return false;
+        String lower = message.toLowerCase(Locale.ROOT);
+        return lower.contains("no fue posible inicializar") ||
+            lower.contains("no se pudo inicializar") ||
+            lower.contains("error al inicializar") ||
+            lower.contains("unable to initialize") ||
+            lower.contains("could not initialize") ||
+            lower.contains("initialization failed") ||
+            lower.contains("impossible d'initialiser");
+    }
+
+    private void handleNperfEngineFailure(String message) {
+        if (!"nperf".equals(phase) || nSaved.get() || finalSaveStarted.get()) return;
+        if (!nErrorDetected.compareAndSet(false, true)) return;
+
+        nperfEngineDiagnostic = message == null ? "" : message.trim();
+        if (nperfAutomation != null) nperfAutomation.cancel();
+        nperfPollingSession++;
+        nperfPollingStarted.set(false);
+
+        if (nperfCompatibilityAttempt == 0) {
+            nperfCompatibilityAttempt = 1;
+            setStatus("nperf no inicializó. Aplicando modo compatible...");
+            SpeedtestService.update(this,
+                "nperf: reintentando inicialización compatible",
+                "Prueba " + currentRun + " de " + totalRuns);
+            handler.postDelayed(this::reloadNperfCompatibilityMode, 1400L);
+        } else {
+            String detail = nperfEngineDiagnostic.isEmpty()
+                ? "motor no disponible" : nperfEngineDiagnostic;
+            setStatus("nperf no pudo inicializar: " + detail);
+            SpeedtestService.update(this,
+                "nperf no pudo inicializar - prueba " + currentRun,
+                "Prueba " + currentRun + " de " + totalRuns);
+        }
+    }
+
+    private void reloadNperfCompatibilityMode() {
+        if (!"nperf".equals(phase) || nSaved.get() || webView == null) return;
+        nErrorDetected.set(false);
+        nGoPressed = false;
+        nPageLoaded = false;
+        nPollCount = 0;
+        nperfPollingStarted.set(false);
+        applyNperfWebProfile(true);
+        webView.stopLoading();
+        webView.loadUrl(NPERF_URL + "?stnl=" + System.currentTimeMillis());
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -1119,6 +1210,8 @@ public class MainActivity extends AppCompatActivity {
 
         if (nperfAutomation != null) nperfAutomation.cancel();
         nperfPollingSession++;
+        nperfCompatibilityAttempt = 0;
+        nperfEngineDiagnostic = "";
         nGoPressed = false; nPageLoaded = false; nPollCount = 0;
         nDownload = ""; nUpload = ""; nPing = ""; nJitter = "";
         nServer = ""; nOperator = ""; nResultId = ""; nResultUrl = "";
@@ -1129,7 +1222,7 @@ public class MainActivity extends AppCompatActivity {
         progressBar.setVisibility(View.VISIBLE);
 
         prepareNperfSession();
-        setNperfUserAgent();
+        applyNperfWebProfile(false);
         webView.loadUrl(NPERF_URL);
         handler.postDelayed(() -> {
             tvResultId.setText("nperf — midiendo...");
@@ -1301,13 +1394,10 @@ public class MainActivity extends AppCompatActivity {
             if (updated) handler.post(this::showPanel);
 
             // Error detectado
-            if ("true".equals(hasError) && nErrorDetected.compareAndSet(false, true)) {
+            if ("true".equals(hasError)) {
                 handler.post(() -> {
                     if (!isConnected()) showNoInternetDialog();
-                    else {
-                        setStatus("Error en nperf - reintentando en 5s...");
-                        handler.postDelayed(this::retryNperf, 5000);
-                    }
+                    else handleNperfEngineFailure("nPerf reportó un error de inicialización");
                 });
                 return;
             }
@@ -1408,18 +1498,69 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setSpeedtestUserAgent() {
-    if (webView != null) {
-        webView.getSettings().setUserAgentString(SPEEDTEST_USER_AGENT);
-        webView.getSettings().setTextZoom(30);
+        if (webView == null) return;
+        WebSettings settings = webView.getSettings();
+        settings.setUserAgentString(SPEEDTEST_USER_AGENT);
+        settings.setTextZoom(30);
+        settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        }
     }
-}
 
-private void setNperfUserAgent() {
-    if (webView != null) {
-        webView.getSettings().setUserAgentString(NPERF_USER_AGENT);
-        webView.getSettings().setTextZoom(100);
+    private String buildNperfDesktopUserAgent(boolean compatibilityMode) {
+        String defaultUa = WebSettings.getDefaultUserAgent(this);
+        Matcher chrome = Pattern.compile("Chrome/([0-9.]+)").matcher(defaultUa);
+        String version = chrome.find() ? chrome.group(1) : "131.0.0.0";
+        String platform = compatibilityMode
+            ? "X11; Linux x86_64" : "Windows NT 10.0; Win64; x64";
+        return "Mozilla/5.0 (" + platform + ") " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + version +
+            " Safari/537.36";
     }
-}
+
+    private void applyNperfWebProfile(boolean compatibilityMode) {
+        if (webView == null) return;
+        WebSettings settings = webView.getSettings();
+        settings.setUserAgentString(buildNperfDesktopUserAgent(compatibilityMode));
+        settings.setTextZoom(100);
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        settings.setLoadsImagesAutomatically(true);
+        settings.setBlockNetworkLoads(false);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        }
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+
+        android.webkit.CookieManager cookies =
+            android.webkit.CookieManager.getInstance();
+        cookies.setAcceptCookie(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            cookies.setAcceptThirdPartyCookies(webView, true);
+        }
+        cookies.flush();
+
+        if (compatibilityMode) webView.clearCache(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                android.content.pm.PackageInfo webViewPackage =
+                    WebView.getCurrentWebViewPackage();
+                if (webViewPackage != null) {
+                    Log.i("SpeedtestNL-Web", "WebView " + webViewPackage.packageName +
+                        " " + webViewPackage.versionName +
+                        " UA=" + settings.getUserAgentString());
+                }
+            } catch (Exception ignored) { }
+        }
+    }
+
+    private void setNperfUserAgent() {
+        applyNperfWebProfile(false);
+    }
 
     private void clearWebViewSession(boolean acceptCookies) {
         if (webView == null) return;
@@ -1485,6 +1626,7 @@ private void setNperfUserAgent() {
 
     private void transitionToNperf() {
         if (!nperfTransitionStarted.compareAndSet(false, true)) return;
+        stopBannerWatcher();
         phase = "nperf";
         nperfRetry = 0;
         setStatus("Speedtest OK. Iniciando nperf...");
