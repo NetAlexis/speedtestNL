@@ -1162,6 +1162,19 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private String decodeJsResult(String value) {
+        try {
+            Object decoded = new org.json.JSONTokener(
+                value == null ? "null" : value).nextValue();
+            if (decoded instanceof String) return (String) decoded;
+            return decoded == null ? "" : decoded.toString();
+        } catch (Exception error) {
+            return value == null ? "" : value
+                .replaceAll("^\"|\"$", "")
+                .replace("\\\"", "\"");
+        }
+    }
+
     private boolean isNperfResultUrl(String url) {
         if (url == null) return false;
         String lower = url.toLowerCase(Locale.ROOT);
