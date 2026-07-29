@@ -17,6 +17,8 @@ El workflow **Android Build** utiliza JDK 17 y Gradle 8.4. En cada cambio ejecut
 - publicación del artefacto `SpeedtestNL-release`
 - publicación del reporte `SpeedtestNL-lint`
 
+La versión del controlador nPerf sin recargas fue validada en **Android Build #63**.
+
 ## Validación en dispositivo
 
 Antes de fusionar cambios del flujo automático deben comprobarse estos puntos:
