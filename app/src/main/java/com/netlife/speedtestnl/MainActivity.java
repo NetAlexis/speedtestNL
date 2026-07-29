@@ -122,10 +122,13 @@ public class MainActivity extends AppCompatActivity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private NperfAutomation nperfAutomation;
     private int nperfPollingSession = 0;
+    private boolean nperfGeckoActive = false;
     private int nperfCompatibilityAttempt = 0;
     private String nperfEngineDiagnostic = "";
-    private static final int PERM_REQ       = 100;
-    private static final int PERM_REQ_NOTIF = 101;
+    private static final int PERM_REQ          = 100;
+    private static final int PERM_REQ_NOTIF    = 101;
+    private static final int PERM_REQ_LOCATION = 102;
+    private static final int NPERF_GECKO_REQUEST = 202;
     private static final int MAX_POLL       = 120; // 6 minutos
 
     private static final String SPEEDTEST_URL = "https://www.speedtest.net/en";
@@ -392,6 +395,7 @@ public class MainActivity extends AppCompatActivity {
         nperfPollingStarted.set(false);
 
         nperfRetry = 0;
+        nperfGeckoActive = false;
         nperfCompatibilityAttempt = 0;
         nperfEngineDiagnostic = "";
         nperfTransitionStarted.set(false);
@@ -715,9 +719,6 @@ public class MainActivity extends AppCompatActivity {
                     if (phase.equals("speedtest") && !pageLoaded && !goPressed) {
                         pageLoaded = true;
                         handler.postDelayed(MainActivity.this::pressGo, 5000);
-                    } else if (phase.equals("nperf") && !nPageLoaded && !nGoPressed) {
-                        nPageLoaded = true;
-                        handler.postDelayed(MainActivity.this::pressNperfGo, 2500);
                     }
                 }
             }
@@ -1115,6 +1116,124 @@ public class MainActivity extends AppCompatActivity {
     }
 
 
+
+    // ══════════════════════════════════════════════════════════════════════
+    // NPERF EN GECKOVIEW — motor Firefox integrado
+    // ══════════════════════════════════════════════════════════════════════
+    private void startNperfGecko() {
+        if (!"nperf".equals(phase) || nSaved.get() || finalSaveStarted.get()) return;
+        if (nperfGeckoActive) return;
+        if (!isWifiConnected()) { showNoWifiDialog(this::startNperfGecko); return; }
+        if (!isConnected()) { showNoInternetDialog(this::startNperfGecko); return; }
+
+        nperfGeckoActive = true;
+        nErrorDetected.set(false);
+        nPageLoaded = true;
+        nGoPressed = true;
+        nPollCount = 0;
+        nperfPollingSession++;
+        nperfPollingStarted.set(false);
+        if (nperfAutomation != null) nperfAutomation.cancel();
+        if (webView != null) webView.stopLoading();
+
+        setStatus("Abriendo nPerf en GeckoView...");
+        SpeedtestService.update(this,
+            "nPerf GeckoView - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+
+        Intent intent = new Intent(this, NperfGeckoActivity.class);
+        intent.putExtra(NperfGeckoActivity.EXTRA_RUN, currentRun);
+        intent.putExtra(NperfGeckoActivity.EXTRA_TOTAL_RUNS, totalRuns);
+        // El sitio nPerf recibe permiso automático dentro de GeckoView. Android
+        // muestra su diálogo del sistema una sola vez cuando aún no fue concedido.
+        intent.putExtra(NperfGeckoActivity.EXTRA_LOCATION_MODE, "auto");
+        startActivityForResult(intent, NPERF_GECKO_REQUEST);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != NPERF_GECKO_REQUEST) return;
+
+        nperfGeckoActive = false;
+        if (!"nperf".equals(phase) || nSaved.get() || finalSaveStarted.get()) return;
+
+        if (resultCode == RESULT_OK && data != null) {
+            nDownload = valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_DOWNLOAD));
+            nUpload = valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_UPLOAD));
+            nPing = valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_LATENCY));
+            nJitter = valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_JITTER));
+            nServer = valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_SERVER));
+            nOperator = valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_OPERATOR));
+            nResultId = valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_RESULT_ID));
+            nResultUrl = valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_RESULT_URL));
+
+            if (nDownload.isEmpty() || nUpload.isEmpty()) {
+                showNperfGeckoDecision(
+                    "INCOMPLETE_RESULT",
+                    "nPerf devolvió un resultado incompleto"
+                );
+                return;
+            }
+
+            if (nSaved.compareAndSet(false, true)) {
+                nDone = true;
+                progressBar.setVisibility(View.GONE);
+                showPanel();
+                setStatus("nPerf GeckoView completado. Guardando...");
+                SpeedtestService.update(this,
+                    "nPerf completado - prueba " + currentRun,
+                    "Prueba " + currentRun + " de " + totalRuns);
+                handler.postDelayed(this::saveTxt, 1000L);
+            }
+            return;
+        }
+
+        String code = data == null ? "GECKO_CANCELLED" :
+            valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_ERROR_CODE));
+        String detail = data == null ? "La actividad nPerf terminó sin resultado" :
+            valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_ERROR_DETAIL));
+        if (detail.isEmpty()) detail = "nPerf no devolvió un resultado válido";
+
+        showNperfGeckoDecision(code, detail);
+    }
+
+    private void showNperfGeckoDecision(String code, String detail) {
+        String safeCode = code == null || code.trim().isEmpty()
+            ? "NPERF_ERROR" : code.trim();
+        String safeDetail = detail == null || detail.trim().isEmpty()
+            ? "nPerf no devolvió un resultado válido" : detail.trim();
+
+        setStatus("Error nPerf GeckoView: " + safeDetail);
+        SpeedtestService.update(this,
+            "Error nPerf GeckoView " + safeCode,
+            "Prueba " + currentRun + " de " + totalRuns);
+
+        handler.post(() -> new AlertDialog.Builder(this)
+            .setTitle("nPerf no completó la prueba")
+            .setMessage(
+                safeDetail + "\n\n" +
+                "Speedtest ya terminó y sus datos se conservan. " +
+                "Puede reintentar únicamente nPerf o detener el proceso."
+            )
+            .setPositiveButton("Reintentar nPerf", (dialog, which) -> {
+                nErrorDetected.set(false);
+                setStatus("Reintentando únicamente nPerf...");
+                handler.postDelayed(this::startNperfGecko, 700L);
+            })
+            .setNegativeButton("Detener", (dialog, which) -> {
+                isRunning = false;
+                releaseWakeLock();
+                SpeedtestService.stop(this);
+                setStatus("Proceso detenido: nPerf no completó la prueba " + currentRun);
+            })
+            .setCancelable(false)
+            .show());
+    }
+
+    private String valueOrEmpty(String value) {
+        return value == null ? "" : value.trim();
+    }
 
     private void setupNperfAutomation() {
         nperfAutomation = new NperfAutomation(webView, handler,
@@ -1633,13 +1752,13 @@ public class MainActivity extends AppCompatActivity {
         SpeedtestService.update(this,
             "Iniciando nperf - prueba " + currentRun,
             "Prueba " + currentRun + " de " + totalRuns);
-        handler.postDelayed(this::startNperf, 2000);
+        handler.postDelayed(this::startNperfGecko, 1200);
     }
 
     private void resumeCurrentPhaseAfterConnection() {
         if ("nperf".equals(phase)) {
             nErrorDetected.set(false);
-            handler.postDelayed(this::startNperf, 1000);
+            handler.postDelayed(this::startNperfGecko, 1000);
         } else {
             errorDetected.set(false);
             handler.postDelayed(this::reloadSpeedtestCurrentAttempt, 1000);
@@ -1655,7 +1774,7 @@ public class MainActivity extends AppCompatActivity {
             SpeedtestService.update(this,
                 "Reintentando nperf - prueba " + currentRun,
                 "Prueba " + currentRun + " de " + totalRuns);
-            handler.postDelayed(this::startNperf, 3000);
+            handler.postDelayed(this::startNperfGecko, 3000);
         } else {
             showErrorDialog();
         }
@@ -1739,6 +1858,17 @@ public class MainActivity extends AppCompatActivity {
                     new String[]{Manifest.permission.POST_NOTIFICATIONS},
                     PERM_REQ_NOTIF);
             }
+        }
+        if (ContextCompat.checkSelfPermission(this,
+                Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(this,
+                Manifest.permission.ACCESS_COARSE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            }, PERM_REQ_LOCATION);
         }
     }
 

@@ -3,15 +3,19 @@ plugins {
 }
 
 android {
-    compileSdk 34
+    compileSdk 36
     namespace 'com.netlife.speedtestnl'
 
     defaultConfig {
         applicationId "com.netlife.speedtestnl"
-        minSdk 24
+        minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 4
+        versionName "1.4-gecko-lna"
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     buildTypes {
@@ -23,12 +27,25 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // GeckoView bundles native libraries. Generate one APK per Android ABI so
+    // each device downloads only the engine it needs.
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'arm64-v8a', 'armeabi-v7a'
+            universalApk false
+        }
     }
 }
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
+
+    implementation 'org.mozilla.geckoview:geckoview:152.0.20260713164047'
 }
