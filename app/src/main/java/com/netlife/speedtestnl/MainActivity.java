@@ -127,9 +127,9 @@ public class MainActivity extends AppCompatActivity {
         "AppleWebKit/537.36 (KHTML, like Gecko) " +
         "Chrome/120.0.0.0 Safari/537.36";
     private static final String NPERF_USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 12; Mobile) " +
-        "AppleWebKit/537.36 (KHTML, like Gecko) " +
-        "Chrome/120.0.0.0 Mobile Safari/537.36";
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+    "AppleWebKit/537.36 (KHTML, like Gecko) " +
+    "Chrome/120.0.0.0 Safari/537.36";
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -1115,65 +1115,75 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void runNperfAfterDebug() {
-        handler.postDelayed(() -> {
-            setStatus("Iniciando nperf automaticamente...");
-            SpeedtestService.update(this,
+    attemptNperfStart(1);
+}
+
+private void attemptNperfStart(int attempt) {
+    if (!"nperf".equals(phase) || nSaved.get() || webView == null) return;
+
+    setStatus("Buscando inicio nperf (" + attempt + "/5)...");
+    SpeedtestService.update(this,
+        "Preparando nperf - prueba " + currentRun,
+        "Prueba " + currentRun + " de " + totalRuns);
+
+    String jsStart = "(function(){try{" +
+        "function visible(e){if(!e)return false;" +
+        "var r=e.getBoundingClientRect(),w=e.ownerDocument.defaultView||window;" +
+        "var s=w.getComputedStyle(e);" +
+        "return r.width>20&&r.height>20&&s.display!=='none'&&s.visibility!=='hidden';}" +
+        "function fire(e){try{e.scrollIntoView({block:'center',inline:'center'});}catch(x){}" +
+        "var r=e.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;" +
+        "['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){" +
+        "try{e.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true," +
+        "clientX:x,clientY:y,view:e.ownerDocument.defaultView||window}));}catch(x){}});" +
+        "try{e.click();}catch(x){}return true;}" +
+        "function hit(d){if(!d)return '';" +
+        "var sels=['#start-test','.start-test','.start-button','#start-button'," +
+        "'[data-testid*=start]','[class*=start][class*=test]','[id*=start][id*=test]'];" +
+        "for(var i=0;i<sels.length;i++){var e=d.querySelector(sels[i]);" +
+        "if(visible(e)){fire(e);return 'button';}}" +
+        "var nodes=d.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]');" +
+        "var words=['iniciar test','iniciar prueba','comenzar test','start test'," +
+        "'lancer le test','haz click aquí para probar de nuevo','haz clic aquí para probar de nuevo'];" +
+        "for(var j=0;j<nodes.length;j++){var n=nodes[j];" +
+        "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'').toLowerCase().trim();" +
+        "for(var k=0;k<words.length;k++){if(t.indexOf(words[k])>-1&&visible(n)){" +
+        "fire(n);return 'button';}}}" +
+        "var canvases=d.querySelectorAll('canvas');" +
+        "for(var c=0;c<canvases.length;c++){var cv=canvases[c],cr=cv.getBoundingClientRect();" +
+        "if(visible(cv)&&cr.width>120&&cr.height>120){fire(cv);return 'canvas';}}" +
+        "return '';}" +
+        "var result=hit(document);if(result)return result;" +
+        "var frames=document.querySelectorAll('iframe');" +
+        "for(var f=0;f<frames.length;f++){try{result=hit(frames[f].contentDocument);" +
+        "if(result)return 'iframe-'+result;}catch(x){}}" +
+        "var body=(document.body?document.body.innerText:'').toLowerCase();" +
+        "if(body.indexOf('accede a la aplicación')>-1||body.indexOf('accede a la aplicacion')>-1)" +
+        "return 'mobile-page';return 'none';}catch(e){return 'error:'+e.message;}})()";
+
+    webView.evaluateJavascript(jsStart, value -> {
+        if (!"nperf".equals(phase) || nSaved.get()) return;
+        String result = value == null ? "" : value.toLowerCase(Locale.ROOT);
+        if (result.contains("button") || result.contains("canvas")) {
+            setStatus("nperf iniciado. Esperando resultados...");
+            SpeedtestService.update(MainActivity.this,
                 "nperf en curso - prueba " + currentRun,
                 "Prueba " + currentRun + " de " + totalRuns);
-
-            // El botón "Iniciar test" está dentro de un canvas — usar click por coordenadas
-            String jsStart = "javascript:(function(){" +
-                // Buscar el canvas del velocímetro
-                "var canvas=document.querySelector('canvas');" +
-                "if(!canvas){" +
-                // Si no hay canvas, buscar SVG o elemento contenedor del velocímetro
-                "  canvas=document.querySelector('svg,[class*=gauge],[class*=speedometer]," +
-                "    [class*=dial],[class*=meter],[class*=needle],[class*=speed-gauge]," +
-                "    [id*=gauge],[id*=speed],[id*=meter]');" +
-                "}" +
-                "if(canvas){" +
-                // Click en el centro del canvas (donde está el botón Iniciar test)
-                "  var rect=canvas.getBoundingClientRect();" +
-                "  var cx=rect.left+rect.width/2;" +
-                "  var cy=rect.top+rect.height/2;" +
-                // Disparar eventos de mouse en el centro del canvas
-                "  ['mousedown','mouseup','click'].forEach(function(evt){" +
-                "    canvas.dispatchEvent(new MouseEvent(evt,{" +
-                "      bubbles:true,cancelable:true," +
-                "      clientX:cx,clientY:cy," +
-                "      view:window" +
-                "    }));" +
-                "  });" +
-                // También disparar touch events (para Android WebView)
-                "  var touch=new Touch({identifier:1,target:canvas," +
-                "    clientX:cx,clientY:cy,pageX:cx,pageY:cy," +
-                "    screenX:cx,screenY:cy,radiusX:1,radiusY:1,rotationAngle:0,force:1});" +
-                "  canvas.dispatchEvent(new TouchEvent('touchstart',{" +
-                "    bubbles:true,cancelable:true,touches:[touch],targetTouches:[touch]," +
-                "    changedTouches:[touch]}));" +
-                "  canvas.dispatchEvent(new TouchEvent('touchend',{" +
-                "    bubbles:true,cancelable:true,touches:[],targetTouches:[]," +
-                "    changedTouches:[touch]}));" +
-                "} else {" +
-                // Fallback: click en el centro de la pantalla
-                "  var cx=window.innerWidth/2,cy=window.innerHeight/2;" +
-                "  var el=document.elementFromPoint(cx,cy);" +
-                "  if(el){el.click();}" +
-                "}" +
-                "})()";
-
-            webView.loadUrl(jsStart);
-            setStatus("nperf en curso...");
-
-            // Reintentar click 3 veces con delay
-            handler.postDelayed(() -> webView.loadUrl(jsStart), 3000);
-            handler.postDelayed(() -> webView.loadUrl(jsStart), 6000);
-
             startNperfPolling();
-        }, 3000);
-    }
+        } else if (attempt < 5) {
+            setStatus(result.contains("mobile-page")
+                ? "nperf mostró vista móvil. Esperando modo web..."
+                : "nperf aún inicializando. Nuevo intento...");
+            handler.postDelayed(() -> attemptNperfStart(attempt + 1), 3000);
+        } else {
+            nGoPressed = false;
+            setStatus("No se encontró el inicio de nperf. Reintentando carga...");
+            handler.postDelayed(this::retryNperf, 2000);
+        }
+    });
+}
 
-    // ── Polling nperf cada 3s ─────────────────────────────────────────────
+// ── Polling nperf cada 3s ─────────────────────────────────────────────
     private void startNperfPolling() {
         handler.postDelayed(new Runnable() {
             @Override
@@ -1383,12 +1393,18 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setSpeedtestUserAgent() {
-        if (webView != null) webView.getSettings().setUserAgentString(SPEEDTEST_USER_AGENT);
+    if (webView != null) {
+        webView.getSettings().setUserAgentString(SPEEDTEST_USER_AGENT);
+        webView.getSettings().setTextZoom(30);
     }
+}
 
-    private void setNperfUserAgent() {
-        if (webView != null) webView.getSettings().setUserAgentString(NPERF_USER_AGENT);
+private void setNperfUserAgent() {
+    if (webView != null) {
+        webView.getSettings().setUserAgentString(NPERF_USER_AGENT);
+        webView.getSettings().setTextZoom(100);
     }
+}
 
     private void clearWebViewSession(boolean acceptCookies) {
         if (webView == null) return;
