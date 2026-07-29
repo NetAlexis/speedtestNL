@@ -28,19 +28,29 @@ Antes de fusionar cambios del flujo automático deben comprobarse estos puntos:
 - nPerf obtiene sus métricas y se genera un único TXT combinado.
 - La siguiente repetición vuelve a abrir Speedtest con la interfaz de escritorio.
 
+### Controlador nPerf sin recargas
+
+La automatización de nPerf está separada en `NperfAutomation.java` y aplica estas reglas:
+
+- interpreta la respuesta de `evaluateJavascript()` con `JSONObject`/`JSONTokener`;
+- calcula el toque usando el tamaño real del viewport y del WebView;
+- usa eventos Android `ACTION_DOWN` y `ACTION_UP`;
+- invalida callbacks de sesiones anteriores;
+- mantiene la página abierta cuando no encuentra el inicio, permitiendo un toque manual sin reinicios;
+- limita los toques automáticos y evita pollings duplicados.
+
 ### Estados esperados durante nPerf
 
 La pantalla debe avanzar por estados similares a estos:
 
 1. `Cargando nperf.com...`
-2. `Revisando consentimiento nperf...`
+2. `Preparando automatización nperf...`
 3. `Aceptando cookies nperf...` cuando el banner está visible.
-4. `Buscando inicio nperf (1/8)...`
-5. `Toque Android sobre nperf (button)...` o `(canvas)...`
-6. `nperf iniciado. Esperando resultados...`
-7. `nperf prueba X/Y — Ns`
-8. `nperf completado. Guardando...`
+4. `Enviando toque a Iniciar test (1/4)...`
+5. `Toque enviado a nperf; verificando inicio...`
+6. `nperf prueba X/Y — Ns`
+7. `nperf completado. Guardando...`
 
-Si no aparecen métricas después del primer toque, la aplicación envía un segundo toque Android de confirmación a los 12 segundos. Los resultados de nPerf incluyen, cuando están disponibles, su identificador y URL `/r/...` en el TXT combinado.
+Si el inicio automático no se confirma, la pantalla mostrará que se puede tocar **Iniciar test** manualmente y la página permanecerá abierta, sin ejecutar el ciclo de recarga anterior. Los resultados de nPerf incluyen, cuando están disponibles, su identificador y URL `/r/...` en el TXT combinado.
 
 El Pull Request debe permanecer en borrador mientras la prueba completa en un dispositivo Android no haya terminado correctamente.
