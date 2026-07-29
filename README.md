@@ -16,21 +16,34 @@ La fase nPerf usa:
 
 - `NperfGeckoActivity` como contenedor independiente;
 - GeckoView estable 152 con interfaz de escritorio;
-- una WebExtension integrada que solo se ejecuta en `nperf.com`;
+- una WebExtension integrada para `nperf.com` y `nperf.net`;
 - mensajería nativa entre la página y Android;
-- eventos táctiles Android para cookies, botón y canvas;
+- eventos táctiles Android para cookies, botón, SVG y canvas;
 - extracción de descarga, subida, latencia, jitter, servidor, operador, ID y URL;
 - devolución de resultados a `MainActivity` antes de crear el TXT combinado.
 
 La extensión aplica intentos limitados y devuelve un error explícito si nPerf no inicializa o no presenta un control operativo. No utiliza ciclos infinitos.
 
+## Control de marcos internos
+
+El medidor público de nPerf puede cargarse dentro de un `iframe` o `frame` distinto de la página exterior. La extensión versión 1.2 usa `frame_controller.js` y:
+
+- se inyecta en todos los marcos coincidentes de `nperf.com` y `nperf.net`;
+- cubre marcos `about:blank` que heredan un origen permitido;
+- busca controles dentro del DOM y raíces Shadow DOM;
+- localiza **Iniciar test** como botón, SVG o canvas;
+- transforma las coordenadas del marco interno a la vista GeckoView completa;
+- envía eventos DOM y un toque Android real;
+- limita el inicio a doce intentos;
+- informa en pantalla si actúa en la página principal o dentro del medidor.
+
 ## Ubicación
 
 SpeedtestNL solicita el permiso de ubicación de Android cuando aún no fue concedido.
 
-El diálogo del sistema operativo debe ser confirmado por el usuario una sola vez; Android no permite que una aplicación apruebe su propio permiso. Después de concederlo, las solicitudes de geolocalización realizadas por `nperf.com` se aceptan automáticamente dentro de GeckoView.
+El diálogo del sistema operativo debe ser confirmado por el usuario una sola vez; Android no permite que una aplicación apruebe su propio permiso. Después de concederlo, las solicitudes de geolocalización realizadas por `nperf.com` y `nperf.net` se aceptan automáticamente dentro de GeckoView.
 
-La automatización rechaza solicitudes de ubicación o mensajes procedentes de dominios distintos de `nperf.com` y `nperf.net`.
+La automatización rechaza solicitudes de ubicación o mensajes procedentes de otros dominios.
 
 ## Compatibilidad
 
@@ -41,6 +54,7 @@ La automatización rechaza solicitudes de ubicación o mensajes procedentes de d
 - Android Gradle Plugin: 8.9.1.
 - Gradle: 8.11.1.
 - GeckoView: `152.0.20260713164047`.
+- Versión de aplicación de esta corrección: `1.2-gecko-frames`, código 2.
 
 Se generan APK separados para:
 
@@ -61,15 +75,14 @@ El workflow **Android Build** instala Android API 36 y ejecuta:
 Después de terminar Speedtest, la interfaz debe avanzar por estados similares a:
 
 1. `Abriendo nPerf en GeckoView...`
-2. `Preparando GeckoView para nPerf...`
-3. `Instalando automatización nPerf...`
-4. `Cargando nPerf en GeckoView...`
-5. `Inicializando motor y servidor nPerf`
-6. `Aceptando cookies nPerf`, cuando el banner esté visible.
-7. `Activando Iniciar test` o `Activando medidor nPerf`.
-8. `nPerf midiendo conexión`.
-9. `Resultado nPerf detectado`.
-10. `nPerf GeckoView completado. Guardando...`
+2. `Automatización nPerf v2 activa en página principal`
+3. `Automatización nPerf v2 activa dentro del medidor`
+4. `Aceptando cookies nPerf`, cuando el banner esté visible.
+5. `Activando Iniciar test dentro del medidor (..., start)` o `(..., gauge)`.
+6. `Enviando toque Android a nPerf...`
+7. `nPerf midiendo conexión`.
+8. `Resultado nPerf detectado`.
+9. `nPerf GeckoView completado. Guardando...`
 
 ## Validación obligatoria en dispositivo
 
@@ -79,7 +92,8 @@ Antes de fusionar el PR deben comprobarse:
 - La transición a GeckoView ocurre sin crear un TXT intermedio.
 - La ubicación Android se concede una vez y el permiso del sitio se acepta automáticamente.
 - Las cookies se aceptan automáticamente.
-- El motor nPerf abandona `Inicializando` y comienza la medición.
+- El estado confirma que la automatización está activa dentro del medidor.
+- **Iniciar test** se activa sin intervención manual.
 - Se reciben descarga, subida, latencia y jitter.
 - Se genera y sube un único TXT combinado.
 - La siguiente repetición vuelve correctamente a Speedtest.
