@@ -84,6 +84,9 @@ public class MainActivity extends AppCompatActivity {
     private final AtomicBoolean nErrorDetected = new AtomicBoolean(false);
     private String  phase      = "speedtest"; // fase: speedtest o nperf
     private boolean watcherRunning = false;   // banner watcher activo
+    private final AtomicBoolean nperfTransitionStarted = new AtomicBoolean(false);
+    private final AtomicBoolean finalSaveStarted = new AtomicBoolean(false);
+    private int nperfRetry = 0;
 
     // ── Config desde Google Sheets ────────────────────────────────────────
     private int totalRuns    = 3;
@@ -116,6 +119,17 @@ public class MainActivity extends AppCompatActivity {
     private static final int PERM_REQ       = 100;
     private static final int PERM_REQ_NOTIF = 101;
     private static final int MAX_POLL       = 120; // 6 minutos
+
+    private static final String SPEEDTEST_URL = "https://www.speedtest.net/en";
+    private static final String NPERF_URL = "https://www.nperf.com/es/";
+    private static final String SPEEDTEST_USER_AGENT =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/120.0.0.0 Safari/537.36";
+    private static final String NPERF_USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 12; Mobile) " +
+        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/120.0.0.0 Mobile Safari/537.36";
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -174,34 +188,8 @@ public class MainActivity extends AppCompatActivity {
                             finish();
                         })
                         .setNegativeButton("No, continuar", (d2, w2) -> {
-                            // Retomar la prueba donde se quedó
-                            setStatus("Retomando prueba " + currentRun + "...");
-                            errorDetected.set(false);
-                            saved.set(false);
-                            resultId = ""; resultUrl = ""; download = "";
-                            upload = ""; ping = ""; jitter = "";
-                            pageLoaded = false; goPressed = false; pollCount = 0;
-                            handler.postDelayed(() -> {
-                                webView.clearCache(true);
-                                webView.clearHistory();
-                                webView.clearFormData();
-                                android.webkit.CookieManager.getInstance()
-                                    .removeAllCookies(null);
-                                // speedtest requiere user agent escritorio para prueba completa
-        webView.getSettings().setUserAgentString(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/120.0.0.0 Safari/537.36");
-
-        webView.loadUrl("https://www.speedtest.net/en");
-        // Iniciar banner watcher para toda la duración de la prueba
-        startBannerWatcher();
-        // Mostrar panel vacío desde el inicio
-        handler.postDelayed(() -> {
-            layoutResults.setVisibility(View.VISIBLE);
-        }, 1000);
-                                progressBar.setVisibility(View.VISIBLE);
-                            }, 2000);
+                            setStatus("Continuando prueba " + currentRun + "...");
+                            if (webView != null) webView.resumeTimers();
                         })
                         .show();
                 })
@@ -352,20 +340,19 @@ public class MainActivity extends AppCompatActivity {
     // INICIAR NUEVA PRUEBA
     // ══════════════════════════════════════════════════════════════════════
     private void startRun() {
-        // Validar WiFi obligatorio primero
         if (!isWifiConnected()) {
-            showNoWifiDialog();
+            showNoWifiDialog(this::startRun);
             return;
         }
         if (!isConnected()) {
-            showNoInternetDialog();
+            showNoInternetDialog(this::startRun);
             return;
         }
 
-        isRunning = true; // activar bloqueo de navegación
+        isRunning = true;
         currentRun++;
         currentRetry = 0;
-        phase = "speedtest"; // siempre empieza con speedtest
+        phase = "speedtest";
         resetState();
 
         String progress = "Prueba " + currentRun + " de " + totalRuns;
@@ -375,31 +362,26 @@ public class MainActivity extends AppCompatActivity {
 
         progressBar.setVisibility(View.VISIBLE);
         layoutResults.setVisibility(View.GONE);
-
-        webView.clearCache(true);
-        webView.clearHistory();
-        webView.clearFormData();
-        android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
-        cm.setAcceptCookie(false);
-        cm.removeAllCookies(null);
-        cm.flush();
-
-        webView.loadUrl("https://www.speedtest.net/en");
+        startBannerWatcher();
+        reloadSpeedtestCurrentAttempt();
     }
 
     private void resetState() {
-        // Reset speedtest
         resultId = ""; resultUrl = ""; download = ""; upload = "";
         ping = ""; jitter = ""; pageLoaded = false;
         goPressed = false; pollCount = 0;
         saved.set(false);
         errorDetected.set(false);
-        // Reset nperf
+
         nDownload = ""; nUpload = ""; nPing = ""; nJitter = "";
         nServer = ""; nOperator = ""; nDone = false;
         nGoPressed = false; nPageLoaded = false; nPollCount = 0;
         nSaved.set(false);
         nErrorDetected.set(false);
+
+        nperfRetry = 0;
+        nperfTransitionStarted.set(false);
+        finalSaveStarted.set(false);
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -509,6 +491,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showNoWifiDialog() {
+        showNoWifiDialog(this::resumeCurrentPhaseAfterConnection);
+    }
+
+    private void showNoWifiDialog(Runnable resumeAction) {
         handler.post(() -> {
             setStatus("Requiere conexion WiFi...");
             SpeedtestService.update(this, "Sin WiFi — esperando conexion", "");
@@ -520,9 +506,9 @@ public class MainActivity extends AppCompatActivity {
                 .setPositiveButton("Aceptar", (d, w) -> {
                     if (isWifiConnected()) {
                         setStatus("WiFi conectado. Continuando...");
-                        handler.postDelayed(this::startRun, 1000);
+                        handler.postDelayed(resumeAction, 1000);
                     } else {
-                        handler.postDelayed(this::showNoWifiDialog, 500);
+                        handler.postDelayed(() -> showNoWifiDialog(resumeAction), 500);
                     }
                 })
                 .setCancelable(false)
@@ -531,6 +517,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showNoInternetDialog() {
+        showNoInternetDialog(this::resumeCurrentPhaseAfterConnection);
+    }
+
+    private void showNoInternetDialog(Runnable resumeAction) {
         handler.post(() -> {
             setStatus("Sin conexion a internet...");
             SpeedtestService.update(this, "Sin datos — esperando conexion", "");
@@ -540,32 +530,14 @@ public class MainActivity extends AppCompatActivity {
                 .setMessage("No hay conexion a internet.\n\n" +
                     "Verifique su conexion y presione Aceptar para continuar.")
                 .setPositiveButton("Aceptar", (d, w) -> {
-                    // Validar conexión al presionar Aceptar
                     if (isConnected()) {
-                        // Tiene internet — resetear flags y reintentar misma prueba
-                        errorDetected.set(false);
-                        setStatus("Conexion restaurada. Reintentando prueba " + currentRun + "...");
+                        setStatus("Conexion restaurada. Continuando prueba " + currentRun + "...");
                         SpeedtestService.update(this,
-                            "Conexion restaurada - reintentando prueba " + currentRun,
+                            "Conexion restaurada - continuando prueba " + currentRun,
                             "Prueba " + currentRun + " de " + totalRuns);
-                        // Resetear SIN cambiar currentRun para retomar prueba correcta
-                        resultId = ""; resultUrl = ""; download = ""; upload = "";
-                        ping = ""; jitter = ""; pageLoaded = false;
-                        goPressed = false; pollCount = 0;
-                        saved.set(false); errorDetected.set(false);
-                        handler.postDelayed(() -> {
-                            webView.clearCache(true);
-                            webView.clearHistory();
-                            webView.clearFormData();
-                            android.webkit.CookieManager.getInstance()
-                                .removeAllCookies(null);
-                            webView.loadUrl("https://www.speedtest.net/en");
-                            progressBar.setVisibility(View.VISIBLE);
-                            layoutResults.setVisibility(View.GONE);
-                        }, 2000);
+                        handler.postDelayed(resumeAction, 1000);
                     } else {
-                        // Sigue sin internet — volver a mostrar el mismo dialog
-                        handler.postDelayed(this::showNoInternetDialog, 500);
+                        handler.postDelayed(() -> showNoInternetDialog(resumeAction), 500);
                     }
                 })
                 .setCancelable(false)
@@ -575,37 +547,22 @@ public class MainActivity extends AppCompatActivity {
 
     private void retryRun() {
         if (currentRetry < maxRetries) {
-            // Aún hay reintentos — reintentar la MISMA prueba (no cambiar currentRun)
             currentRetry++;
-            int runActual = currentRun; // guardar para mostrar correcto
+            int runActual = currentRun;
             setStatus("Reintentando prueba " + runActual +
                 " (" + currentRetry + "/" + maxRetries + ")...");
             SpeedtestService.update(this,
                 "Reintentando prueba " + runActual +
                 " (" + currentRetry + "/" + maxRetries + ")",
                 "Prueba " + runActual + " de " + totalRuns);
-            // Resetear estado SIN tocar currentRun
+
             resultId = ""; resultUrl = ""; download = ""; upload = "";
             ping = ""; jitter = ""; pageLoaded = false;
             goPressed = false; pollCount = 0;
             saved.set(false);
             errorDetected.set(false);
-            // Recargar la página para reintentar la misma prueba
-            handler.postDelayed(() -> {
-                webView.clearCache(true);
-                webView.clearHistory();
-                webView.clearFormData();
-                android.webkit.CookieManager cm =
-                    android.webkit.CookieManager.getInstance();
-                cm.setAcceptCookie(false);
-                cm.removeAllCookies(null);
-                cm.flush();
-                webView.loadUrl("https://www.speedtest.net/en");
-                progressBar.setVisibility(View.VISIBLE);
-                layoutResults.setVisibility(View.GONE);
-            }, 3000);
+            handler.postDelayed(this::reloadSpeedtestCurrentAttempt, 3000);
         } else {
-            // Reintentos agotados — mostrar dialog al usuario
             showErrorDialog();
         }
     }
@@ -664,10 +621,7 @@ public class MainActivity extends AppCompatActivity {
         s.setUseWideViewPort(true);
         s.setGeolocationEnabled(true);
         // User agent escritorio — necesario para prueba completa (descarga + subida)
-        s.setUserAgentString(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/120.0.0.0 Safari/537.36");
+        s.setUserAgentString(SPEEDTEST_USER_AGENT);
         // Zoom: permitir pellizcar pero sin controles visibles
         s.setSupportZoom(true);
         s.setBuiltInZoomControls(true);
@@ -738,9 +692,9 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 if (url == null) return;
-                if (phase.equals("speedtest") && url.contains("/result/") && !saved.get()) {
-                    handler.postDelayed(MainActivity.this::saveTxt, 4000);
-                } else if (phase.equals("nperf") && url.contains("/result") && !nSaved.get()) {
+                if ("speedtest".equals(phase) && url.contains("/result/") && !saved.get()) {
+                    handler.postDelayed(() -> completeSpeedtestFromUrl(url), 4000);
+                } else if ("nperf".equals(phase) && url.contains("/result") && !nSaved.get()) {
                     if (nSaved.compareAndSet(false, true))
                         handler.postDelayed(MainActivity.this::extractNperfMetrics, 4000);
                 }
@@ -749,42 +703,15 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onReceivedError(WebView view, int errorCode,
                     String description, String failingUrl) {
-                AtomicBoolean errFlag = phase.equals("nperf") ? nErrorDetected : errorDetected;
-                if (!saved.get() && !nSaved.get() && errFlag.compareAndSet(false, true)) {
-                    handler.post(() -> {
-                        if (!isWifiConnected()) {
-                            showNoWifiDialog();
-                        } else if (!isConnected()) {
-                            showNoInternetDialog();
-                        } else {
-                            setStatus("Error de red - reintentando...");
-                            if (phase.equals("nperf"))
-                                handler.postDelayed(MainActivity.this::startNperf, 3000);
-                            else
-                                handler.postDelayed(MainActivity.this::retryRun, 3000);
-                        }
-                    });
-                }
+                handleWebViewError();
             }
 
             @Override
             public void onReceivedError(WebView view,
                     android.webkit.WebResourceRequest request,
                     android.webkit.WebResourceError error) {
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                    if (request.isForMainFrame() && !saved.get() &&
-                            errorDetected.compareAndSet(false, true)) {
-                        handler.post(() -> {
-                            if (!isWifiConnected()) {
-                                showNoWifiDialog();
-                            } else if (!isConnected()) {
-                                showNoInternetDialog();
-                            } else {
-                                setStatus("Error de red - reintentando...");
-                                handler.postDelayed(MainActivity.this::retryRun, 3000);
-                            }
-                        });
-                    }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && request.isForMainFrame()) {
+                    handleWebViewError();
                 }
             }
         });
@@ -862,22 +789,8 @@ public class MainActivity extends AppCompatActivity {
                 // PASO 1: Monitorear URL — funciona en fondo y primer plano
                 String curUrl = webView.getUrl();
                 if (curUrl != null && curUrl.contains("/result/")) {
-                    java.util.regex.Matcher urlMatcher = java.util.regex.Pattern
-                        .compile("result/([\\w-]+)")
-                        .matcher(curUrl);
-                    if (urlMatcher.find() && saved.compareAndSet(false, true)) {
-                        resultId  = urlMatcher.group(1);
-                        resultUrl = curUrl;
-                        handler.post(() -> {
-                            showPanel();
-                            if (!isInBackground) {
-                                extractMetricsThenSave();
-                            } else {
-                                handler.postDelayed(MainActivity.this::saveTxt, 1000);
-                            }
-                        });
-                        return;
-                    }
+                    completeSpeedtestFromUrl(curUrl);
+                    return;
                 }
 
                 // PASO 2: JS solo en primer plano
@@ -937,8 +850,8 @@ public class MainActivity extends AppCompatActivity {
         }, 8000);
     }
 
-    private void extractMetricsThenSave() {
-        if (webView == null) { saveTxt(); return; }
+    private void extractMetricsThenStartNperf() {
+        if (webView == null) { transitionToNperf(); return; }
         webView.evaluateJavascript(
             "(function(){" +
             "  function g(ss){for(var i=0;i<ss.length;i++){" +
@@ -967,7 +880,7 @@ public class MainActivity extends AppCompatActivity {
                         if (!jt.isEmpty()) jitter   = jt;
                     } catch (Exception e) { e.printStackTrace(); }
                 }
-                handler.postDelayed(MainActivity.this::saveTxt, 500);
+                transitionToNperf();
             }
         );
     }
@@ -1039,16 +952,13 @@ public class MainActivity extends AppCompatActivity {
             boolean ready = "true".equals(isResult) ||
                             (!rid.isEmpty() && hasDl && hasUl);
 
-            if (ready && saved.compareAndSet(false, true)) {
+            if (ready) {
                 resultId  = rid.isEmpty()  ? resultId  : rid;
                 resultUrl = url == null    ? resultUrl : url;
                 download  = hasDl ? dl : download;
                 upload    = hasUl ? ul : upload;
                 ping = pg; jitter = jt;
-                handler.post(() -> {
-                    showPanel();
-                    handler.postDelayed(MainActivity.this::saveTxt, 2000);
-                });
+                completeSpeedtest();
             }
         } catch (Exception e) { e.printStackTrace(); }
     }
@@ -1057,6 +967,8 @@ public class MainActivity extends AppCompatActivity {
     // GUARDAR TXT — I/O en hilo separado
     // ══════════════════════════════════════════════════════════════════════
     private void saveTxt() {
+        if (!"nperf".equals(phase) || !nSaved.get()) return;
+        if (!finalSaveStarted.compareAndSet(false, true)) return;
         setStatus("Guardando resultado en Google Drive...");
 
         String now  = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss",
@@ -1171,22 +1083,9 @@ public class MainActivity extends AppCompatActivity {
         setStatus("Cargando nperf.com...");
         progressBar.setVisibility(View.VISIBLE);
 
-        webView.clearCache(true);
-        webView.clearHistory();
-        webView.clearFormData();
-        android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
-        cm.setAcceptCookie(true); // nperf necesita cookies para funcionar
-        cm.removeAllCookies(null);
-        cm.flush();
-
-        // nperf requiere user agent móvil para renderizar correctamente
-        webView.getSettings().setUserAgentString(
-            "Mozilla/5.0 (Linux; Android 12; Mobile) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/120.0.0.0 Mobile Safari/537.36");
-
-        webView.loadUrl("https://www.nperf.com/es/");
-        // Limpiar panel para mostrar valores de nperf
+        clearWebViewSession(true);
+        setNperfUserAgent();
+        webView.loadUrl(NPERF_URL);
         handler.postDelayed(() -> {
             tvResultId.setText("nperf — midiendo...");
             tvDownload.setText("-");
@@ -1342,9 +1241,8 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 if (!nSaved.get() && nPollCount >= MAX_POLL) {
-                    // Timeout — guardar con lo que haya
-                    if (nSaved.compareAndSet(false, true))
-                        handler.post(() -> saveTxt());
+                    setStatus("Tiempo agotado en nperf. Reintentando...");
+                    retryNperf();
                     return;
                 }
                 if (!nSaved.get()) handler.postDelayed(this, 3000);
@@ -1383,7 +1281,7 @@ public class MainActivity extends AppCompatActivity {
                     if (!isConnected()) showNoInternetDialog();
                     else {
                         setStatus("Error en nperf - reintentando en 5s...");
-                        handler.postDelayed(this::startNperf, 5000);
+                        handler.postDelayed(this::retryNperf, 5000);
                     }
                 });
                 return;
@@ -1454,18 +1352,6 @@ public class MainActivity extends AppCompatActivity {
     // COMPLETAR SPEEDTEST — iniciar nperf antes de guardar
     // ══════════════════════════════════════════════════════════════════════
     private void onRunComplete(boolean success) {
-        if (phase.equals("speedtest")) {
-            // Speedtest terminó — ahora ejecutar nperf
-            phase = "nperf";
-            setStatus("Speedtest OK. Iniciando nperf...");
-            SpeedtestService.update(this,
-                "Iniciando nperf - prueba " + currentRun,
-                "Prueba " + currentRun + " de " + totalRuns);
-            handler.postDelayed(this::startNperf, 2000);
-            return;
-        }
-
-        // nperf también terminó — guardar TXT combinado
         progressBar.setVisibility(View.GONE);
         showPanel();
 
@@ -1477,20 +1363,133 @@ public class MainActivity extends AppCompatActivity {
             SpeedtestService.update(this, msg,
                 "Prueba " + currentRun + " de " + totalRuns);
             Toast.makeText(this,
-                "Prueba " + currentRun + " OK. Siguiente en " +
-                waitBetween + "s...", Toast.LENGTH_SHORT).show();
+                "Prueba " + currentRun +
+                (success ? " guardada." : " con error de guardado.") +
+                " Siguiente en " + waitBetween + "s...",
+                Toast.LENGTH_SHORT).show();
             handler.postDelayed(this::startRun, waitBetween * 1000L);
         } else {
-            // Todas completadas — desbloquear navegación
             isRunning = false;
             stopBannerWatcher();
             releaseWakeLock();
             SpeedtestService.stop(this);
-            setStatus("COMPLETADO: " + totalRuns + " pruebas guardadas");
+            setStatus(success
+                ? "COMPLETADO: " + totalRuns + " pruebas guardadas"
+                : "COMPLETADO con error al guardar la ultima prueba");
             Toast.makeText(this,
                 "Todas las pruebas completadas (" + totalRuns + ")",
                 Toast.LENGTH_LONG).show();
         }
+    }
+
+    private void setSpeedtestUserAgent() {
+        if (webView != null) webView.getSettings().setUserAgentString(SPEEDTEST_USER_AGENT);
+    }
+
+    private void setNperfUserAgent() {
+        if (webView != null) webView.getSettings().setUserAgentString(NPERF_USER_AGENT);
+    }
+
+    private void clearWebViewSession(boolean acceptCookies) {
+        if (webView == null) return;
+        webView.clearCache(true);
+        webView.clearHistory();
+        webView.clearFormData();
+        android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+        cm.setAcceptCookie(acceptCookies);
+        cm.removeAllCookies(null);
+        cm.flush();
+    }
+
+    private void reloadSpeedtestCurrentAttempt() {
+        if (webView == null) return;
+        phase = "speedtest";
+        pageLoaded = false;
+        goPressed = false;
+        pollCount = 0;
+        saved.set(false);
+        errorDetected.set(false);
+        setSpeedtestUserAgent();
+        clearWebViewSession(false);
+        webView.loadUrl(SPEEDTEST_URL);
+        progressBar.setVisibility(View.VISIBLE);
+        layoutResults.setVisibility(View.GONE);
+    }
+
+    private void completeSpeedtestFromUrl(String url) {
+        if (url != null) {
+            Matcher matcher = Pattern.compile("result/([\w-]+)").matcher(url);
+            if (matcher.find()) resultId = matcher.group(1);
+            resultUrl = url;
+        }
+        completeSpeedtest();
+    }
+
+    private void completeSpeedtest() {
+        if (!"speedtest".equals(phase) || !saved.compareAndSet(false, true)) return;
+        handler.post(() -> {
+            showPanel();
+            if (!isInBackground && webView != null) {
+                extractMetricsThenStartNperf();
+            } else {
+                transitionToNperf();
+            }
+        });
+    }
+
+    private void transitionToNperf() {
+        if (!nperfTransitionStarted.compareAndSet(false, true)) return;
+        phase = "nperf";
+        nperfRetry = 0;
+        setStatus("Speedtest OK. Iniciando nperf...");
+        SpeedtestService.update(this,
+            "Iniciando nperf - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+        handler.postDelayed(this::startNperf, 2000);
+    }
+
+    private void resumeCurrentPhaseAfterConnection() {
+        if ("nperf".equals(phase)) {
+            nErrorDetected.set(false);
+            handler.postDelayed(this::startNperf, 1000);
+        } else {
+            errorDetected.set(false);
+            handler.postDelayed(this::reloadSpeedtestCurrentAttempt, 1000);
+        }
+    }
+
+    private void retryNperf() {
+        if (nSaved.get() || finalSaveStarted.get()) return;
+        if (nperfRetry < maxRetries) {
+            nperfRetry++;
+            nErrorDetected.set(false);
+            setStatus("Reintentando nperf (" + nperfRetry + "/" + maxRetries + ")...");
+            SpeedtestService.update(this,
+                "Reintentando nperf - prueba " + currentRun,
+                "Prueba " + currentRun + " de " + totalRuns);
+            handler.postDelayed(this::startNperf, 3000);
+        } else {
+            showErrorDialog();
+        }
+    }
+
+    private void handleWebViewError() {
+        boolean nperfPhase = "nperf".equals(phase);
+        AtomicBoolean completed = nperfPhase ? nSaved : saved;
+        AtomicBoolean errorFlag = nperfPhase ? nErrorDetected : errorDetected;
+        if (completed.get() || !errorFlag.compareAndSet(false, true)) return;
+
+        handler.post(() -> {
+            if (!isWifiConnected()) {
+                showNoWifiDialog();
+            } else if (!isConnected()) {
+                showNoInternetDialog();
+            } else {
+                setStatus("Error de red - reintentando...");
+                if (nperfPhase) retryNperf();
+                else retryRun();
+            }
+        });
     }
 
     // ══════════════════════════════════════════════════════════════════════

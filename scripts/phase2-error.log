@@ -1,5 +1,0 @@
-Traceback (most recent call last):
-  File "/home/runner/work/speedtestNL/speedtestNL/scripts/apply_phase2.py", line 569, in <module>
-    raise RuntimeError(f"forbidden legacy flow remains: {forbidden[:60]}")
-RuntimeError: forbidden legacy flow remains: handler.postDelayed(MainActivity.this::saveTxt, 2000);
-     
