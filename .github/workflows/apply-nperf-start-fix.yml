@@ -1,0 +1,180 @@
+name: Apply nPerf Start Fix
+
+on:
+  push:
+    branches:
+      - agent/stabilize-speedtest-nperf
+    paths:
+      - .github/workflows/apply-nperf-start-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/stabilize-speedtest-nperf
+          fetch-depth: 0
+
+      - name: Apply guarded nPerf correction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('app/src/main/java/com/netlife/speedtestnl/MainActivity.java')
+          text = path.read_text(encoding='utf-8')
+
+          old_ua = '''    private static final String NPERF_USER_AGENT =
+              "Mozilla/5.0 (Linux; Android 12; Mobile) " +
+              "AppleWebKit/537.36 (KHTML, like Gecko) " +
+              "Chrome/120.0.0.0 Mobile Safari/537.36";'''
+          new_ua = '''    private static final String NPERF_USER_AGENT =
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+              "AppleWebKit/537.36 (KHTML, like Gecko) " +
+              "Chrome/120.0.0.0 Safari/537.36";'''
+          if text.count(old_ua) != 1:
+              raise SystemExit('Unexpected nPerf user-agent block')
+          text = text.replace(old_ua, new_ua, 1)
+
+          old_setters = '''    private void setSpeedtestUserAgent() {
+              if (webView != null) webView.getSettings().setUserAgentString(SPEEDTEST_USER_AGENT);
+          }
+
+          private void setNperfUserAgent() {
+              if (webView != null) webView.getSettings().setUserAgentString(NPERF_USER_AGENT);
+          }'''
+          new_setters = '''    private void setSpeedtestUserAgent() {
+              if (webView != null) {
+                  webView.getSettings().setUserAgentString(SPEEDTEST_USER_AGENT);
+                  webView.getSettings().setTextZoom(30);
+              }
+          }
+
+          private void setNperfUserAgent() {
+              if (webView != null) {
+                  webView.getSettings().setUserAgentString(NPERF_USER_AGENT);
+                  webView.getSettings().setTextZoom(100);
+              }
+          }'''
+          if text.count(old_setters) != 1:
+              raise SystemExit('Unexpected user-agent setter block')
+          text = text.replace(old_setters, new_setters, 1)
+
+          pattern = re.compile(
+              r'    private void runNperfAfterDebug\(\) \{.*?\n    \}\n\n    // ── Polling nperf cada 3s',
+              re.DOTALL,
+          )
+          replacement = '''    private void runNperfAfterDebug() {
+              attemptNperfStart(1);
+          }
+
+          private void attemptNperfStart(int attempt) {
+              if (!"nperf".equals(phase) || nSaved.get() || webView == null) return;
+
+              setStatus("Buscando inicio nperf (" + attempt + "/5)...");
+              SpeedtestService.update(this,
+                  "Preparando nperf - prueba " + currentRun,
+                  "Prueba " + currentRun + " de " + totalRuns);
+
+              String jsStart = "(function(){try{" +
+                  "function visible(e){if(!e)return false;" +
+                  "var r=e.getBoundingClientRect();" +
+                  "var w=e.ownerDocument.defaultView||window;" +
+                  "var s=w.getComputedStyle(e);" +
+                  "return r.width>20&&r.height>20&&s.display!=='none'&&s.visibility!=='hidden';}" +
+                  "function fire(e){try{e.scrollIntoView({block:'center',inline:'center'});}catch(x){}" +
+                  "var r=e.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;" +
+                  "['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){" +
+                  "try{e.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true," +
+                  "clientX:x,clientY:y,view:e.ownerDocument.defaultView||window}));}catch(x){}});" +
+                  "try{e.click();}catch(x){}return true;}" +
+                  "function hit(d){if(!d)return '';" +
+                  "var sels=['#start-test','.start-test','.start-button','#start-button'," +
+                  "'[data-testid*=start]','[class*=start][class*=test]'," +
+                  "'[id*=start][id*=test]'];" +
+                  "for(var i=0;i<sels.length;i++){var e=d.querySelector(sels[i]);" +
+                  "if(visible(e)){fire(e);return 'button';}}" +
+                  "var nodes=d.querySelectorAll('button,a,[role=button]," +
+                  "input[type=button],input[type=submit]');" +
+                  "var words=['iniciar test','iniciar prueba','comenzar test','start test'," +
+                  "'lancer le test','haz click aquí para probar de nuevo'," +
+                  "'haz clic aquí para probar de nuevo'];" +
+                  "for(var j=0;j<nodes.length;j++){var n=nodes[j];" +
+                  "var t=(n.textContent||n.value||n.getAttribute('aria-label')||'')" +
+                  ".toLowerCase().trim();" +
+                  "for(var k=0;k<words.length;k++){if(t.indexOf(words[k])>-1&&visible(n)){" +
+                  "fire(n);return 'button';}}}" +
+                  "var canvases=d.querySelectorAll('canvas');" +
+                  "for(var c=0;c<canvases.length;c++){var cv=canvases[c];" +
+                  "var cr=cv.getBoundingClientRect();" +
+                  "if(visible(cv)&&cr.width>120&&cr.height>120){fire(cv);return 'canvas';}}" +
+                  "return '';}" +
+                  "var result=hit(document);if(result)return result;" +
+                  "var frames=document.querySelectorAll('iframe');" +
+                  "for(var f=0;f<frames.length;f++){try{result=hit(frames[f].contentDocument);" +
+                  "if(result)return 'iframe-'+result;}catch(x){}}" +
+                  "var body=(document.body?document.body.innerText:'').toLowerCase();" +
+                  "if(body.indexOf('accede a la aplicación')>-1||" +
+                  "body.indexOf('accede a la aplicacion')>-1)return 'mobile-page';" +
+                  "return 'none';}catch(e){return 'error:'+e.message;}})()";
+
+              webView.evaluateJavascript(jsStart, value -> {
+                  if (!"nperf".equals(phase) || nSaved.get()) return;
+                  String result = value == null ? "" : value.toLowerCase(Locale.ROOT);
+                  boolean started = result.contains("button") || result.contains("canvas");
+
+                  if (started) {
+                      setStatus("nperf iniciado. Esperando resultados...");
+                      SpeedtestService.update(MainActivity.this,
+                          "nperf en curso - prueba " + currentRun,
+                          "Prueba " + currentRun + " de " + totalRuns);
+                      startNperfPolling();
+                      return;
+                  }
+
+                  if (attempt < 5) {
+                      setStatus(result.contains("mobile-page")
+                          ? "nperf mostró vista móvil. Esperando modo web..."
+                          : "nperf aún inicializando. Nuevo intento...");
+                      handler.postDelayed(() -> attemptNperfStart(attempt + 1), 3000);
+                  } else {
+                      nGoPressed = false;
+                      setStatus("No se encontró el inicio de nperf. Reintentando carga...");
+                      handler.postDelayed(this::retryNperf, 2000);
+                  }
+              });
+          }
+
+          // ── Polling nperf cada 3s'''
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'Unexpected nPerf start method count: {count}')
+
+          required = [
+              'Chrome/120.0.0.0 Safari/537.36";',
+              'private void attemptNperfStart(int attempt)',
+              'nperf iniciado. Esperando resultados...',
+              'webView.getSettings().setTextZoom(100);',
+          ]
+          for marker in required:
+              if marker not in text:
+                  raise SystemExit(f'Missing marker: {marker}')
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+          git diff --check
+          rm .github/workflows/apply-nperf-start-fix.yml
+
+      - name: Commit nPerf correction
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/netlife/speedtestnl/MainActivity.java .github/workflows/apply-nperf-start-fix.yml
+          git commit -m "Fix nPerf web initialization and start detection"
+          git push origin HEAD:agent/stabilize-speedtest-nperf
