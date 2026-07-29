@@ -1,0 +1,42 @@
+name: Restore JavaScript Decoder
+
+on:
+  push:
+    branches:
+      - agent/stabilize-speedtest-nperf
+    paths:
+      - scripts/restore_js_decoder.py
+      - .github/workflows/restore-js-decoder.yml
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout correction branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/stabilize-speedtest-nperf
+          fetch-depth: 0
+
+      - name: Restore decoder
+        run: python scripts/restore_js_decoder.py
+
+      - name: Verify and clean temporary files
+        run: |
+          git diff --check
+          rm scripts/restore_js_decoder.py
+          rm .github/workflows/restore-js-decoder.yml
+          git diff --check
+
+      - name: Commit decoder correction
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/netlife/speedtestnl/MainActivity.java \
+                  scripts/restore_js_decoder.py \
+                  .github/workflows/restore-js-decoder.yml
+          git commit -m "Restore robust JavaScript result decoding"
+          git push origin HEAD:agent/stabilize-speedtest-nperf
