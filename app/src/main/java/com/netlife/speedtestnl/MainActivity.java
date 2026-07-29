@@ -1418,7 +1418,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void completeSpeedtestFromUrl(String url) {
         if (url != null) {
-            Matcher matcher = Pattern.compile("result/([\w-]+)").matcher(url);
+            Matcher matcher = Pattern.compile("result/([\\w-]+)").matcher(url);
             if (matcher.find()) resultId = matcher.group(1);
             resultUrl = url;
         }
