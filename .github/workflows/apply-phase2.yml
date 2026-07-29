@@ -1,0 +1,44 @@
+name: Apply Phase 2 Flow
+
+on:
+  push:
+    branches:
+      - agent/stabilize-speedtest-nperf
+    paths:
+      - scripts/apply_phase2.py
+      - .github/workflows/apply-phase2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/stabilize-speedtest-nperf
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply guarded migration
+        run: python scripts/apply_phase2.py
+
+      - name: Verify intended scope
+        run: |
+          git diff --check
+          changed="$(git diff --name-only)"
+          test "$changed" = "app/src/main/java/com/netlife/speedtestnl/MainActivity.java"
+
+      - name: Commit migrated MainActivity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/netlife/speedtestnl/MainActivity.java
+          git commit -m "Stabilize Speedtest to nPerf flow [skip ci]"
+          git push origin HEAD:agent/stabilize-speedtest-nperf
