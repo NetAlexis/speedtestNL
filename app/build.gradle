@@ -10,8 +10,8 @@ android {
         applicationId "com.netlife.speedtestnl"
         minSdk 26
         targetSdk 34
-        versionCode 2
-        versionName "1.2-gecko-frames"
+        versionCode 3
+        versionName "1.3-gecko-network"
     }
 
     buildFeatures {

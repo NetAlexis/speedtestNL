@@ -84,6 +84,7 @@ public class NperfGeckoActivity extends AppCompatActivity {
     private GeckoSession.PermissionDelegate.Callback pendingAndroidPermission;
     private String locationMode = "auto";
     private boolean finished = false;
+    private int controlledRetryCount = 0;
     private int runNumber = 1;
     private int totalRuns = 1;
 
@@ -143,6 +144,7 @@ public class NperfGeckoActivity extends AppCompatActivity {
                         GeckoRuntimeSettings runtimeSettings =
                             new GeckoRuntimeSettings.Builder()
                                 .javaScriptEnabled(true)
+                                .allowInsecureConnections(GeckoRuntimeSettings.ALLOW_ALL)
                                 .consoleOutput(true)
                                 .remoteDebuggingEnabled(BuildConfig.DEBUG)
                                 .build();
@@ -343,13 +345,57 @@ public class NperfGeckoActivity extends AppCompatActivity {
                 break;
 
             case "error":
-                fail(data.optString("code", "NPERF_ERROR"),
-                    data.optString("detail", "nPerf informó un error"));
+                handleExtensionError(
+                    data.optString("code", "NPERF_ERROR"),
+                    data.optString("detail", "nPerf informó un error")
+                );
                 break;
 
             default:
                 break;
         }
+    }
+
+    private void handleExtensionError(String code, String detail) {
+        if (finished) return;
+        String safeCode = code == null ? "NPERF_ERROR" : code.trim();
+        String safeDetail = detail == null || detail.trim().isEmpty()
+            ? "nPerf informó un error" : detail.trim();
+
+        boolean recoverable = "DATA_CHANNEL_FAILURE".equals(safeCode) ||
+            "START_NOT_RESPONDING".equals(safeCode) ||
+            "ENGINE_INITIALIZATION".equals(safeCode) ||
+            "NO_OPERATIONAL_CONTROL".equals(safeCode);
+
+        if (recoverable && controlledRetryCount < 1) {
+            controlledRetryCount++;
+            Log.w(TAG, safeCode + ": " + safeDetail +
+                " — retrying nPerf inside GeckoView");
+            setStatus("nPerf no recibió datos. Reintentando solo nPerf...");
+            progressBar.setIndeterminate(true);
+            handler.postDelayed(this::reloadNperfOnly, 1800L);
+            return;
+        }
+
+        fail(safeCode, safeDetail);
+    }
+
+    private void reloadNperfOnly() {
+        if (finished || session == null) return;
+        download = "";
+        upload = "";
+        latency = "";
+        jitter = "";
+        server = "";
+        operator = "";
+        resultId = "";
+        resultUrl = "";
+        downloadView.setText("↓ -");
+        uploadView.setText("↑ -");
+        latencyView.setText("Ping -");
+        jitterView.setText("Jitter -");
+        setStatus("Recargando únicamente el medidor nPerf...");
+        session.loadUri(NPERF_URL + "?stnl_retry=" + System.currentTimeMillis());
     }
 
     private void updateMetrics(JSONObject data) {

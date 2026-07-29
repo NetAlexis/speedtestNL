@@ -1169,8 +1169,10 @@ public class MainActivity extends AppCompatActivity {
             nResultUrl = valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_RESULT_URL));
 
             if (nDownload.isEmpty() || nUpload.isEmpty()) {
-                setStatus("nPerf GeckoView devolvió un resultado incompleto.");
-                handler.postDelayed(this::retryNperf, 1200L);
+                showNperfGeckoDecision(
+                    "INCOMPLETE_RESULT",
+                    "nPerf devolvió un resultado incompleto"
+                );
                 return;
             }
 
@@ -1193,11 +1195,42 @@ public class MainActivity extends AppCompatActivity {
             valueOrEmpty(data.getStringExtra(NperfGeckoActivity.EXTRA_ERROR_DETAIL));
         if (detail.isEmpty()) detail = "nPerf no devolvió un resultado válido";
 
-        setStatus("Error nPerf GeckoView: " + detail);
+        showNperfGeckoDecision(code, detail);
+    }
+
+    private void showNperfGeckoDecision(String code, String detail) {
+        String safeCode = code == null || code.trim().isEmpty()
+            ? "NPERF_ERROR" : code.trim();
+        String safeDetail = detail == null || detail.trim().isEmpty()
+            ? "nPerf no devolvió un resultado válido" : detail.trim();
+
+        setStatus("Error nPerf GeckoView: " + safeDetail);
         SpeedtestService.update(this,
-            "Error nPerf GeckoView " + code,
+            "Error nPerf GeckoView " + safeCode,
             "Prueba " + currentRun + " de " + totalRuns);
-        handler.postDelayed(this::retryNperf, 1500L);
+
+        handler.post(() -> new AlertDialog.Builder(this)
+            .setTitle("nPerf no completó la prueba")
+            .setMessage(
+                safeDetail + "
+
+" +
+                "Speedtest ya terminó y sus datos se conservan. " +
+                "Puede reintentar únicamente nPerf o detener el proceso."
+            )
+            .setPositiveButton("Reintentar nPerf", (dialog, which) -> {
+                nErrorDetected.set(false);
+                setStatus("Reintentando únicamente nPerf...");
+                handler.postDelayed(this::startNperfGecko, 700L);
+            })
+            .setNegativeButton("Detener", (dialog, which) -> {
+                isRunning = false;
+                releaseWakeLock();
+                SpeedtestService.stop(this);
+                setStatus("Proceso detenido: nPerf no completó la prueba " + currentRun);
+            })
+            .setCancelable(false)
+            .show());
     }
 
     private String valueOrEmpty(String value) {

@@ -12,6 +12,8 @@
   let lastTap = "";
   let lastTapAt = 0;
   let attempts = 0;
+  let firstActivationAt = 0;
+  let lastActivationAt = 0;
   let consentAttempts = 0;
   let done = false;
   let lastMetrics = "";
@@ -221,6 +223,10 @@
     if (key === lastTap && Date.now() - lastTapAt < 2800) return false;
     lastTap = key;
     lastTapAt = Date.now();
+    if (role === "start" || role === "gauge") {
+      if (!firstActivationAt) firstActivationAt = lastTapAt;
+      lastActivationAt = lastTapAt;
+    }
     try { node.focus({ preventScroll: true }); } catch (_) {}
     const init = { bubbles: true, cancelable: true, composed: true,
       clientX: x, clientY: y, button: 0, buttons: 1 };
@@ -272,9 +278,25 @@
   const tick = () => {
     if (done || !document.body) return;
     const body = norm(document.body.innerText || "");
+    const dataFailure = [
+      "no se pueden recibir datos", "no se pudo recibir datos", "no se reciben datos",
+      "cannot receive data", "unable to receive data", "no data received"
+    ].find(v => body.includes(v));
+    if (dataFailure) {
+      done = true;
+      return send({
+        type: "error",
+        code: "DATA_CHANNEL_FAILURE",
+        detail: "nPerf no pudo recibir datos del servidor de medición"
+      });
+    }
+
     const fatal = ["no fue posible inicializar", "no se pudo inicializar", "error al inicializar",
       "unable to initialize", "could not initialize", "initialization failed"].find(v => body.includes(v));
-    if (fatal) return send({ type: "error", code: "ENGINE_INITIALIZATION", detail: fatal });
+    if (fatal) {
+      done = true;
+      return send({ type: "error", code: "ENGINE_INITIALIZATION", detail: fatal });
+    }
 
     const consent = findConsent(body);
     if (consent && consentAttempts < 6) {
@@ -306,13 +328,27 @@
     const start = findStart();
     const gauge = start ? null : findGauge();
     if ((start || gauge) && !hasMetric) {
+      const now = Date.now();
       const target = start || gauge;
       const role = start ? "start" : "gauge";
-      if (attempts >= 12) return send({ type: "error", code: "START_NOT_RESPONDING",
-        detail: "El control Iniciar test siguió visible después de 12 activaciones" });
+
+      if (firstActivationAt && now - lastActivationAt < 15000) {
+        state("connecting", "nPerf iniciado; esperando conexión con el servidor de medición");
+        return;
+      }
+
+      if (attempts >= 3) {
+        done = true;
+        return send({
+          type: "error",
+          code: "START_NOT_RESPONDING",
+          detail: "nPerf no inició después de 3 activaciones espaciadas"
+        });
+      }
+
       if (activate(target, role)) {
         attempts += 1;
-        state("ready", `Activando Iniciar test dentro del medidor (${attempts}/12, ${role})`, true);
+        state("ready", `Activando Iniciar test (${attempts}/3, ${role})`, true);
       }
       return;
     }
