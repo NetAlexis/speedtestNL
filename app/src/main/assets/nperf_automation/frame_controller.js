@@ -14,6 +14,9 @@
   let attempts = 0;
   let firstActivationAt = 0;
   let lastActivationAt = 0;
+  let firstMetricAt = 0;
+  let lastProgressAt = 0;
+  let testStarted = false;
   let consentAttempts = 0;
   let done = false;
   let lastMetrics = "";
@@ -57,6 +60,19 @@
     node.innerText || node.textContent || node.value ||
     node.getAttribute?.("aria-label") || node.getAttribute?.("title") || ""
   ));
+
+  const deepRawText = () => rootList().map(root => {
+    try {
+      if (root === document) {
+        return document.body?.innerText || document.documentElement?.textContent || "";
+      }
+      return root.textContent || "";
+    } catch (_) {
+      return "";
+    }
+  }).join("\n");
+
+  const deepText = () => norm(deepRawText());
 
   const nativeSend = payload => {
     try { browser.runtime.sendNativeMessage(APP, payload).catch(() => {}); }
@@ -108,7 +124,7 @@
     data.frameDepth = Number(data.frameDepth || 0) + 1;
     data.viewportWidth = innerWidth || 1;
     data.viewportHeight = innerHeight || 1;
-    if (["state", "tap", "metrics", "complete", "error"].includes(data.type)) {
+    if (["extension_ready", "state", "tap", "metrics", "complete", "error"].includes(data.type)) {
       childActiveAt = Date.now();
     }
     if (isTop) {
@@ -254,7 +270,7 @@
         if (value) return value;
       }
     }
-    const lines = (document.body?.innerText || "").split(/\n+/).map(v => v.trim()).filter(Boolean);
+    const lines = deepRawText().split(/\n+/).map(v => v.trim()).filter(Boolean);
     for (let i = 0; i < lines.length; i += 1) {
       const line = norm(lines[i]);
       if (!labels.some(label => line === label || line.startsWith(label + " "))) continue;
@@ -275,28 +291,34 @@
     resultId: (location.href.match(/\/r\/(\d+)/i) || location.href.match(/\/result\/?([^/?#]+)/i) || [])[1] || ""
   });
 
+  const failOnce = (code, detail, extra = {}) => {
+    if (done) return;
+    done = true;
+    send(Object.assign({ type: "error", code, detail }, extra));
+  };
+
   const tick = () => {
     if (done || !document.body) return;
-    const body = norm(document.body.innerText || "");
+    const now = Date.now();
+    const body = deepText();
+
     const dataFailure = [
       "no se pueden recibir datos", "no se pudo recibir datos", "no se reciben datos",
+      "compruebe su conexion a internet antes de iniciar un test",
       "cannot receive data", "unable to receive data", "no data received"
-    ].find(v => body.includes(v));
+    ].find(value => body.includes(value));
     if (dataFailure) {
-      done = true;
-      return send({
-        type: "error",
-        code: "DATA_CHANNEL_FAILURE",
-        detail: "nPerf no pudo recibir datos del servidor de medición"
-      });
+      return failOnce(
+        "DATA_CHANNEL_FAILURE",
+        "nPerf no pudo recibir datos del servidor de medición"
+      );
     }
 
-    const fatal = ["no fue posible inicializar", "no se pudo inicializar", "error al inicializar",
-      "unable to initialize", "could not initialize", "initialization failed"].find(v => body.includes(v));
-    if (fatal) {
-      done = true;
-      return send({ type: "error", code: "ENGINE_INITIALIZATION", detail: fatal });
-    }
+    const fatal = [
+      "no fue posible inicializar", "no se pudo inicializar", "error al inicializar",
+      "unable to initialize", "could not initialize", "initialization failed"
+    ].find(value => body.includes(value));
+    if (fatal) return failOnce("ENGINE_INITIALIZATION", fatal);
 
     const consent = findConsent(body);
     if (consent && consentAttempts < 6) {
@@ -307,68 +329,119 @@
     }
 
     const values = metrics();
-    const hasMetric = Boolean(values.download || values.upload || values.latency || values.jitter);
+    const hasThroughput = Boolean(values.download || values.upload);
+    const hasLatency = Boolean(values.latency || values.jitter);
+    const hasMetric = hasThroughput || hasLatency;
+
     if (hasMetric) {
+      testStarted = true;
+      if (!firstMetricAt) firstMetricAt = now;
       const signature = JSON.stringify(values);
       if (signature !== lastMetrics) {
         lastMetrics = signature;
+        lastProgressAt = now;
         send(Object.assign({ type: "metrics" }, values));
       }
     }
 
-    const completeText = ["haz click aqui para probar de nuevo", "haz clic aqui para probar de nuevo",
-      "restart test", "reiniciar test", "reinitier le test"].some(v => body.includes(v));
-    if ((completeText || /\/r\/|\/result/i.test(location.href)) && values.download && values.upload) {
+    const completeText = [
+      "haz click aqui para probar de nuevo", "haz clic aqui para probar de nuevo",
+      "restart test", "reiniciar test", "reinitier le test"
+    ].some(value => body.includes(value));
+    if ((completeText || /\/r\/|\/result/i.test(location.href)) &&
+        values.download && values.upload) {
       done = true;
       state("complete", "Resultado nPerf detectado", true);
       send(Object.assign({ type: "complete" }, values));
       return;
     }
 
-    const start = findStart();
-    const gauge = start ? null : findGauge();
-    if ((start || gauge) && !hasMetric) {
-      const now = Date.now();
-      const target = start || gauge;
-      const role = start ? "start" : "gauge";
+    // A latency value alone is not a healthy speed test. If throughput never
+    // begins, fail deterministically instead of displaying "midiendo" forever.
+    if (hasLatency && !hasThroughput) {
+      const latencyWait = now - (firstMetricAt || firstActivationAt || now);
+      if (latencyWait >= 25000) {
+        return failOnce(
+          "DATA_CHANNEL_STALL",
+          "nPerf obtuvo latencia, pero no inició descarga ni subida"
+        );
+      }
+      state("latency", "nPerf midiendo latencia; esperando descarga");
+      return;
+    }
 
-      if (firstActivationAt && now - lastActivationAt < 15000) {
+    if (hasThroughput) {
+      state("running", "nPerf midiendo descarga y subida");
+      return;
+    }
+
+    const startControl = findStart();
+    const gauge = startControl ? null : findGauge();
+    const target = startControl || gauge;
+
+    // A deeper frame owns the operational meter. Parent frames must not click
+    // their visual copy of the gauge while the child controller is active.
+    if (target && now - childActiveAt < 6000) {
+      state("child_active", "Medidor interno nPerf activo; esperando resultado");
+      return;
+    }
+
+    if (target) {
+      const role = startControl ? "start" : "gauge";
+
+      if (firstActivationAt || testStarted) {
+        const wait = now - firstActivationAt;
+        if (wait >= 35000) {
+          return failOnce(
+            "START_DATA_TIMEOUT",
+            "nPerf recibió la activación, pero no inició la transferencia de datos"
+          );
+        }
         state("connecting", "nPerf iniciado; esperando conexión con el servidor de medición");
         return;
       }
 
-      if (attempts >= 3) {
-        done = true;
-        return send({
-          type: "error",
-          code: "START_NOT_RESPONDING",
-          detail: "nPerf no inició después de 3 activaciones espaciadas"
-        });
-      }
-
+      // Exactly one activation per frame session. The native Android tap is
+      // already sent together with the DOM activation; repeated taps corrupt
+      // the nPerf state machine.
       if (activate(target, role)) {
-        attempts += 1;
-        state("ready", `Activando Iniciar test (${attempts}/3, ${role})`, true);
+        attempts = 1;
+        testStarted = true;
+        state("ready", `Activando Iniciar test (1/1, ${role})`, true);
       }
       return;
     }
 
-    if (hasMetric) return state("running", "nPerf midiendo conexión");
+    if (firstActivationAt) {
+      const wait = now - firstActivationAt;
+      if (wait >= 35000) {
+        return failOnce(
+          "START_DATA_TIMEOUT",
+          "nPerf no inició datos después de activar el medidor"
+        );
+      }
+      state("connecting", "nPerf iniciado; esperando conexión con el servidor de medición");
+      return;
+    }
 
     if ((body.includes("inicializando") || body.includes("initializing")) &&
-        (!isTop || Date.now() - childActiveAt > 5000)) {
+        (!isTop || now - childActiveAt > 5000)) {
       state("initializing", "Inicializando motor y servidor nPerf");
       return;
     }
 
-    if (Date.now() - beganAt > 90000) {
-      return send({ type: "error", code: "NO_OPERATIONAL_CONTROL",
-        detail: "nPerf no presentó un control operativo dentro de GeckoView",
-        frameCount: document.querySelectorAll("iframe,frame").length,
-        excerpt: body.slice(0, 400) });
+    if (now - beganAt > 90000) {
+      return failOnce(
+        "NO_OPERATIONAL_CONTROL",
+        "nPerf no presentó un control operativo dentro de GeckoView",
+        {
+          frameCount: document.querySelectorAll("iframe,frame").length,
+          excerpt: body.slice(0, 400)
+        }
+      );
     }
 
-    if (!isTop || Date.now() - childActiveAt > 5000) {
+    if (!isTop || now - childActiveAt > 5000) {
       const count = document.querySelectorAll("iframe,frame").length;
       state("waiting", count
         ? `Buscando Iniciar test dentro de ${count} marco(s) nPerf`

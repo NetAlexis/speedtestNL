@@ -145,6 +145,9 @@ public class NperfGeckoActivity extends AppCompatActivity {
                             new GeckoRuntimeSettings.Builder()
                                 .javaScriptEnabled(true)
                                 .allowInsecureConnections(GeckoRuntimeSettings.ALLOW_ALL)
+                                .setLnaEnabled(false)
+                                .setLnaBlocking(false)
+                                .setLnaBlockTrackers(false)
                                 .consoleOutput(true)
                                 .remoteDebuggingEnabled(BuildConfig.DEBUG)
                                 .build();
@@ -274,6 +277,12 @@ public class NperfGeckoActivity extends AppCompatActivity {
                         return GeckoResult.fromValue(ContentPermission.VALUE_DENY);
                     }
                     setStatus("Ubicación solicitada por nPerf: aceptada automáticamente");
+                    return GeckoResult.fromValue(ContentPermission.VALUE_ALLOW);
+                }
+
+                if (permission.permission == PERMISSION_LOCAL_NETWORK_ACCESS ||
+                        permission.permission == PERMISSION_LOCAL_DEVICE_ACCESS) {
+                    setStatus("Acceso al servidor local nPerf: autorizado automáticamente");
                     return GeckoResult.fromValue(ContentPermission.VALUE_ALLOW);
                 }
 
