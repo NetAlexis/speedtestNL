@@ -1212,9 +1212,7 @@ public class MainActivity extends AppCompatActivity {
         handler.post(() -> new AlertDialog.Builder(this)
             .setTitle("nPerf no completó la prueba")
             .setMessage(
-                safeDetail + "
-
-" +
+                safeDetail + "\n\n" +
                 "Speedtest ya terminó y sus datos se conservan. " +
                 "Puede reintentar únicamente nPerf o detener el proceso."
             )
