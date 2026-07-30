@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- NperfBrowserActivity sets a structured RESULT_CANCELED and finishes
+         through deliverFailure(); calling super would bypass that contract. -->
+    <issue id="MissingSuperCall">
+        <ignore path="src/main/java/com/netlife/speedtestnl/NperfBrowserActivity.java" />
+    </issue>
+</lint>
