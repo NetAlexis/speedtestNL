@@ -125,6 +125,9 @@ public class MainActivity extends AppCompatActivity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ActivityResultLauncher<Intent> nperfBrowserLauncher;
     private boolean nperfBrowserActive = false;
+    private String pendingSaveFileName = "";
+    private String pendingSaveContent = "";
+    private boolean driveSaveDecisionVisible = false;
     private final AtomicBoolean speedtestResultExtractionStarted =
         new AtomicBoolean(false);
     private int speedtestResultExtractionAttempt = 0;
@@ -412,6 +415,9 @@ public class MainActivity extends AppCompatActivity {
         nperfEngineDiagnostic = "";
         nperfTransitionStarted.set(false);
         finalSaveStarted.set(false);
+        pendingSaveFileName = "";
+        pendingSaveContent = "";
+        driveSaveDecisionVisible = false;
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -1141,68 +1147,89 @@ public class MainActivity extends AppCompatActivity {
         String finalTxt = txt;
         String fileName = base + ".txt";
 
-        new Thread(() -> {
-            boolean ok = uploadToDrive(fileName, finalTxt);
-            handler.post(() -> onRunComplete(ok));
-        }).start();
+        pendingSaveFileName = fileName;
+        pendingSaveContent = finalTxt;
+        beginPendingResultUpload(fileName, finalTxt);
     }
 
-    private boolean uploadToDrive(String fileName, String content) {
-        java.net.HttpURLConnection conn = null;
-        try {
-            String jsonBody = "{" +
-                "\"fileName\":\"" + fileName + "\"," +
-                "\"content\":\"" + content
-                    .replace("\\", "\\\\")
-                    .replace("\"", "\\\"")
-                    .replace("\n", "\\n")
-                    .replace("\r", "\\r") +
-                "\"" +
-            "}";
+    private void beginPendingResultUpload(String fileName, String content) {
+        setStatus("Guardando copia local antes de subir a Drive...");
+        SpeedtestService.update(this,
+            "Guardando prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
 
-            byte[] body = jsonBody.getBytes("UTF-8");
-            java.net.URL url = new java.net.URL(DRIVE_SCRIPT_URL);
-            conn = (java.net.HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setDoOutput(true);
-            conn.setConnectTimeout(15000);
-            conn.setReadTimeout(15000);
-            conn.setRequestProperty("Content-Type", "application/json");
-            conn.setInstanceFollowRedirects(true);
+        ResultSaveManager.persistAndUpload(this, DRIVE_SCRIPT_URL,
+            fileName, content, new ResultSaveManager.Callback() {
+                @Override
+                public void onStatus(String message) {
+                    handler.post(() -> {
+                        setStatus(message);
+                        SpeedtestService.update(MainActivity.this, message,
+                            "Prueba " + currentRun + " de " + totalRuns);
+                    });
+                }
 
-            java.io.OutputStream os = conn.getOutputStream();
-            os.write(body);
-            os.flush();
-            os.close();
+                @Override
+                public void onSuccess(File localFile) {
+                    handler.post(() -> {
+                        pendingSaveFileName = "";
+                        pendingSaveContent = "";
+                        driveSaveDecisionVisible = false;
+                        setStatus("Guardado confirmado en Google Drive: " + fileName);
+                        onRunComplete(true);
+                    });
+                }
 
-            int code = conn.getResponseCode();
-            java.io.BufferedReader br = new java.io.BufferedReader(
-                new java.io.InputStreamReader(
-                    code == 200 ? conn.getInputStream() : conn.getErrorStream()));
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = br.readLine()) != null) sb.append(line);
-            br.close();
-
-            String response = sb.toString();
-            boolean success = response.contains("ok");
-
-            handler.post(() -> setStatus(success
-                ? "Guardado en Google Drive: " + fileName
-                : "Error al subir a Drive"));
-
-            return success;
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            handler.post(() -> setStatus("Error conexion Drive: " + e.getMessage()));
-            return false;
-        } finally {
-            if (conn != null) conn.disconnect();
-        }
+                @Override
+                public void onFailure(String detail, File localFile) {
+                    handler.post(() -> {
+                        finalSaveStarted.set(false);
+                        String localPath = localFile == null ? "" : localFile.getAbsolutePath();
+                        showDriveSaveDecision(detail, localPath);
+                    });
+                }
+            });
     }
 
+    private void showDriveSaveDecision(String detail, String localPath) {
+        if (driveSaveDecisionVisible) return;
+        driveSaveDecisionVisible = true;
 
+        String safeDetail = valueOrEmpty(detail);
+        if (safeDetail.isEmpty()) safeDetail = "Google Drive no confirmó la carga";
+        String locationText = valueOrEmpty(localPath).isEmpty()
+            ? "No se pudo confirmar una copia local."
+            : "El TXT quedó protegido localmente y no se repetirá la medición.";
+
+        setStatus("Resultado pendiente de Google Drive: " + safeDetail);
+        SpeedtestService.update(this,
+            "Resultado pendiente de Drive - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+
+        final String message = safeDetail;
+        new AlertDialog.Builder(this)
+            .setTitle("No se confirmó el guardado en Drive")
+            .setMessage(message + "\n\n" + locationText +
+                "\n\nLa siguiente prueba no comenzará hasta confirmar esta carga.")
+            .setPositiveButton("Reintentar subida", (dialog, which) -> {
+                driveSaveDecisionVisible = false;
+                if (pendingSaveFileName.isEmpty() || pendingSaveContent.isEmpty()) {
+                    setStatus("No hay un resultado pendiente disponible para reintentar.");
+                    return;
+                }
+                if (!finalSaveStarted.compareAndSet(false, true)) return;
+                beginPendingResultUpload(pendingSaveFileName, pendingSaveContent);
+            })
+            .setNegativeButton("Detener", (dialog, which) -> {
+                driveSaveDecisionVisible = false;
+                isRunning = false;
+                releaseWakeLock();
+                SpeedtestService.stop(this);
+                setStatus("Proceso detenido. El resultado pendiente no fue descartado.");
+            })
+            .setCancelable(false)
+            .show();
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     // NPERF EN CUSTOM TAB — navegador completo + AccessibilityService
@@ -1676,6 +1703,12 @@ public class MainActivity extends AppCompatActivity {
     private void onRunComplete(boolean success) {
         progressBar.setVisibility(View.GONE);
         showPanel();
+
+        if (!success) {
+            finalSaveStarted.set(false);
+            setStatus("La prueba no avanzará hasta guardar el resultado.");
+            return;
+        }
 
         if (currentRun < totalRuns) {
             String msg = "Prueba " + currentRun +
