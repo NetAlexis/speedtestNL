@@ -13,12 +13,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Parses the visual nPerf result panel from ML Kit OCR lines.
+ * Reads the final nPerf result card from ML Kit OCR bounding boxes.
  *
- * Chrome does not always expose the canvas result values through the
- * accessibility tree. This parser therefore uses the text bounding boxes to
- * reject browser chrome, advertisements and the small 1 Gb/s gauge scale, then
- * selects the large result values shown in the central result card.
+ * Contract for the public nPerf panel:
+ *  - the blue/down-arrow value is download;
+ *  - the up-arrow value is upload;
+ *  - ping/latency is the third primary value;
+ *  - every Media/Average/Promedio value is excluded;
+ *  - nPerf jitter is intentionally empty.
  */
 final class NperfScreenshotResultParser {
 
@@ -32,39 +34,44 @@ final class NperfScreenshotResultParser {
         }
     }
 
+    private enum Role { DOWNLOAD, UPLOAD, LATENCY }
+
     private static final Pattern THROUGHPUT_VALUE_UNIT = Pattern.compile(
-        "(?i)([0-9]{1,4}(?:[.,][0-9]{1,3})?)\\s*" +
+        "(?i)([0-9]{1,5}(?:[.,][0-9]{1,3})?)\\s*" +
         "(gbit/s|gb/s|gbps|mbit/s|mb/s|mbps|mbits/s|mbit\\s*/\\s*s)");
     private static final Pattern THROUGHPUT_UNIT_VALUE = Pattern.compile(
         "(?i)(gbit/s|gb/s|gbps|mbit/s|mb/s|mbps|mbits/s|mbit\\s*/\\s*s)" +
-        "\\s*[:=-]?\\s*([0-9]{1,4}(?:[.,][0-9]{1,3})?)");
+        "\\s*[:=-]?\\s*([0-9]{1,5}(?:[.,][0-9]{1,3})?)");
     private static final Pattern LATENCY_VALUE_UNIT = Pattern.compile(
-        "(?i)([0-9]{1,4}(?:[.,][0-9]{1,3})?)\\s*m(?:illi)?s(?:ec(?:ond)?s?)?");
+        "(?i)([0-9]{1,5}(?:[.,][0-9]{1,3})?)\\s*m(?:illi)?s(?:ec(?:ond)?s?)?");
     private static final Pattern LATENCY_UNIT_VALUE = Pattern.compile(
         "(?i)m(?:illi)?s(?:ec(?:ond)?s?)?\\s*[:=-]?\\s*" +
-        "([0-9]{1,4}(?:[.,][0-9]{1,3})?)");
+        "([0-9]{1,5}(?:[.,][0-9]{1,3})?)");
 
     private static final class Candidate {
         final String value;
         final String raw;
         final Rect bounds;
-        final boolean downloadLabel;
-        final boolean uploadLabel;
-        final boolean latencyLabel;
-        final boolean jitterLabel;
+        final Role labelledRole;
         final double score;
 
-        Candidate(String value, String raw, Rect bounds,
-                boolean downloadLabel, boolean uploadLabel,
-                boolean latencyLabel, boolean jitterLabel, double score) {
+        Candidate(String value, String raw, Rect bounds, Role labelledRole,
+                double score) {
             this.value = value;
             this.raw = raw;
             this.bounds = new Rect(bounds);
-            this.downloadLabel = downloadLabel;
-            this.uploadLabel = uploadLabel;
-            this.latencyLabel = latencyLabel;
-            this.jitterLabel = jitterLabel;
+            this.labelledRole = labelledRole;
             this.score = score;
+        }
+    }
+
+    private static final class Marker {
+        final Role role;
+        final Rect bounds;
+
+        Marker(Role role, Rect bounds) {
+            this.role = role;
+            this.bounds = new Rect(bounds);
         }
     }
 
@@ -80,78 +87,115 @@ final class NperfScreenshotResultParser {
 
         List<Candidate> throughput = new ArrayList<>();
         List<Candidate> latency = new ArrayList<>();
+        List<Marker> markers = new ArrayList<>();
 
         for (Line line : lines) {
             if (!isUsefulLine(line, imageWidth, imageHeight)) continue;
             String normalized = normalize(line.text);
-            boolean downloadLabel = containsAny(normalized,
-                "download", "descarga", "bajada", "debit descendant");
-            boolean uploadLabel = containsAny(normalized,
-                "upload", "subida", "carga", "debit montant");
-            boolean latencyLabel = containsAny(normalized,
-                "latency", "latencia", "ping");
-            boolean jitterLabel = normalized.contains("jitter");
+            if (isAverageLine(normalized)) continue;
+
+            Role role = roleFor(line.text);
+            if (role != null) markers.add(new Marker(role, line.bounds));
 
             MetricValue throughputValue = parseThroughput(line.text);
-            if (throughputValue != null &&
-                    !looksLikeServerCapacityLine(line.text)) {
+            if (throughputValue != null && !looksLikeServerCapacityLine(line.text)) {
                 double score = visualScore(line.bounds, imageWidth, imageHeight,
-                    downloadLabel || uploadLabel, normalized);
+                    role == Role.DOWNLOAD || role == Role.UPLOAD, normalized);
                 throughput.add(new Candidate(throughputValue.value, line.text,
-                    line.bounds, downloadLabel, uploadLabel, false, false, score));
+                    line.bounds,
+                    role == Role.DOWNLOAD || role == Role.UPLOAD ? role : null,
+                    score));
             }
 
             String latencyValue = parseLatency(line.text);
-            if (!latencyValue.isEmpty()) {
+            if (!latencyValue.isEmpty() && !containsAny(normalized, "jitter")) {
                 double score = visualScore(line.bounds, imageWidth, imageHeight,
-                    latencyLabel || jitterLabel, normalized);
+                    role == Role.LATENCY, normalized);
                 latency.add(new Candidate(latencyValue, line.text, line.bounds,
-                    false, false, latencyLabel, jitterLabel, score));
+                    role == Role.LATENCY ? role : null, score));
             }
         }
 
         deduplicate(throughput);
         deduplicate(latency);
-        Collections.sort(throughput, candidateOrder());
-        Collections.sort(latency, candidateOrder());
 
-        Candidate download = firstLabelled(throughput, true);
-        Candidate upload = firstLabelled(throughput, false);
+        Candidate download = firstLabelled(throughput, Role.DOWNLOAD);
+        Candidate upload = firstLabelled(throughput, Role.UPLOAD);
+
+        if (download == null) {
+            download = nearestToMarker(throughput, markers, Role.DOWNLOAD,
+                null, imageWidth, imageHeight);
+        }
+        if (upload == null) {
+            upload = nearestToMarker(throughput, markers, Role.UPLOAD,
+                download, imageWidth, imageHeight);
+        }
 
         if (download == null || upload == null || download == upload) {
-            Candidate[] visualPair = chooseVisualThroughputPair(
+            Candidate[] pair = choosePrimaryThroughputPair(
                 throughput, imageWidth, imageHeight);
-            if (download == null) download = visualPair[0];
-            if (upload == null || upload == download) upload = visualPair[1];
+            if (download == null) download = pair[0];
+            if (upload == null || upload == download) upload = pair[1];
+        }
+
+        Candidate ping = firstLabelled(latency, Role.LATENCY);
+        if (ping == null) {
+            ping = nearestToMarker(latency, markers, Role.LATENCY,
+                null, imageWidth, imageHeight);
+        }
+        if (ping == null) {
+            ping = choosePrimaryLatency(latency, download, upload,
+                imageWidth, imageHeight);
         }
 
         if (download != null) result.download = download.value;
-        if (upload != null) result.upload = upload.value;
-
-        Candidate latencyCandidate = firstLatency(latency, false);
-        Candidate jitterCandidate = firstLatency(latency, true);
-        if (latencyCandidate == null) {
-            latencyCandidate = chooseVisualLatency(latency, download, upload,
-                imageHeight, false);
-        }
-        if (jitterCandidate == null) {
-            jitterCandidate = chooseVisualLatency(latency, download, upload,
-                imageHeight, true);
-        }
-
-        if (latencyCandidate != null) result.latency = latencyCandidate.value;
-        if (jitterCandidate != null && jitterCandidate != latencyCandidate) {
-            result.jitter = jitterCandidate.value;
-        }
+        if (upload != null && upload != download) result.upload = upload.value;
+        if (ping != null) result.latency = ping.value;
+        result.jitter = "";
         return result;
     }
 
+    private static Role roleFor(String raw) {
+        String normalized = normalize(raw);
+        if (containsAny(normalized,
+                "download", "descarga", "bajada", "debit descendant") ||
+                containsDownArrow(raw)) {
+            return Role.DOWNLOAD;
+        }
+        if (containsAny(normalized,
+                "upload", "subida", "carga", "debit montant") ||
+                containsUpArrow(raw)) {
+            return Role.UPLOAD;
+        }
+        if (containsAny(normalized, "latency", "latencia", "ping")) {
+            return Role.LATENCY;
+        }
+        return null;
+    }
+
+    private static boolean containsDownArrow(String value) {
+        if (value == null) return false;
+        return value.contains("↓") || value.contains("⬇") || value.contains("⇩") ||
+            value.contains("▼") || value.contains("⭣") || value.contains("▾");
+    }
+
+    private static boolean containsUpArrow(String value) {
+        if (value == null) return false;
+        return value.contains("↑") || value.contains("⬆") || value.contains("⇧") ||
+            value.contains("▲") || value.contains("⭡") || value.contains("▴");
+    }
+
+    private static boolean isAverageLine(String normalized) {
+        return containsAny(normalized,
+            "media", "average", "avg", "promedio", "moyenne");
+    }
+
     private static boolean isUsefulLine(Line line, int width, int height) {
-        if (line.text.isEmpty() || line.bounds.isEmpty()) return false;
+        if (line == null || line.text.isEmpty() || line.bounds.isEmpty()) return false;
         int centerY = line.bounds.centerY();
         int centerX = line.bounds.centerX();
-        if (centerY < height * 0.11f || centerY > height * 0.84f) return false;
-        if (centerX < width * 0.05f || centerX > width * 0.97f) return false;
+        if (centerY < height * 0.10f || centerY > height * 0.86f) return false;
+        if (centerX < width * 0.03f || centerX > width * 0.98f) return false;
 
         String normalized = normalize(line.text);
         return !containsAny(normalized,
@@ -161,31 +205,16 @@ final class NperfScreenshotResultParser {
             !looksLikeServerCapacityLine(line.text);
     }
 
-    /**
-     * nPerf prints the selected server above the result graph. That title may
-     * include the server/plan capacity, for example:
-     * "[EC] Ibarra - 3 Gb/s - Plus Internet de Alta Velocidad".
-     *
-     * OCR correctly reads "3 Gb/s" and converts it to 3000 Mb/s, but that is
-     * not the measured download. A genuine result containing Gb/s is retained
-     * when its line is only the value/unit or carries a metric label.
-     */
     private static boolean looksLikeServerCapacityLine(String source) {
         String normalized = normalize(source);
         if (!containsAny(normalized, "gbit/s", "gb/s", "gbps")) return false;
 
-        // Explicit metric labels make the value eligible even above 1 Gb/s.
-        if (containsAny(normalized,
-                "download", "descarga", "bajada", "debit descendant",
-                "upload", "subida", "carga", "debit montant",
-                "media", "average", "promedio")) {
+        if (roleFor(source) == Role.DOWNLOAD || roleFor(source) == Role.UPLOAD) {
             return false;
         }
 
-        // Remove the numeric capacity and its unit. Remaining alphabetic text
-        // means this is a server, ISP, city or commercial-plan description.
         String residue = normalized
-            .replaceAll("[0-9]{1,4}(?:[.,][0-9]{1,3})?\\s*(?:gbit/s|gb/s|gbps)", " ")
+            .replaceAll("[0-9]{1,5}(?:[.,][0-9]{1,3})?\\s*(?:gbit/s|gb/s|gbps)", " ")
             .replaceAll("[^a-z]+", " ")
             .replaceAll("\\s+", " ")
             .trim();
@@ -194,80 +223,125 @@ final class NperfScreenshotResultParser {
 
     private static double visualScore(Rect bounds, int width, int height,
             boolean labelled, String normalized) {
-        double score = bounds.height() * 12.0d + bounds.width() * 0.12d;
+        double score = bounds.height() * 12.0d + bounds.width() * 0.10d;
         float cx = bounds.exactCenterX() / Math.max(1f, width);
         float cy = bounds.exactCenterY() / Math.max(1f, height);
-        if (labelled) score += 500.0d;
-        if (cx >= 0.35f && cx <= 0.92f) score += 90.0d;
-        if (cy >= 0.28f && cy <= 0.72f) score += 130.0d;
-        if (cy < 0.30f) score -= 120.0d;
+        if (labelled) score += 700.0d;
+        if (cx >= 0.28f && cx <= 0.96f) score += 100.0d;
+        if (cy >= 0.25f && cy <= 0.74f) score += 160.0d;
+        if (cy < 0.24f) score -= 180.0d;
         if (containsAny(normalized, "up to", "hasta", "maximum", "maximo")) {
-            score -= 600.0d;
+            score -= 900.0d;
         }
         return score;
     }
 
-    private static Comparator<Candidate> candidateOrder() {
-        return (left, right) -> {
-            int score = Double.compare(right.score, left.score);
-            if (score != 0) return score;
-            return Integer.compare(right.bounds.height(), left.bounds.height());
-        };
-    }
-
-    private static Candidate firstLabelled(List<Candidate> candidates,
-            boolean download) {
+    private static Candidate firstLabelled(List<Candidate> candidates, Role role) {
+        Candidate best = null;
         for (Candidate candidate : candidates) {
-            if (download && candidate.downloadLabel) return candidate;
-            if (!download && candidate.uploadLabel) return candidate;
+            if (candidate.labelledRole != role) continue;
+            if (best == null || candidate.score > best.score) best = candidate;
         }
-        return null;
+        return best;
     }
 
-    private static Candidate[] chooseVisualThroughputPair(
+    private static Candidate nearestToMarker(List<Candidate> candidates,
+            List<Marker> markers, Role role, Candidate excluded,
+            int width, int height) {
+        Candidate best = null;
+        double bestDistance = Double.POSITIVE_INFINITY;
+        for (Marker marker : markers) {
+            if (marker.role != role) continue;
+            for (Candidate candidate : candidates) {
+                if (candidate == excluded || isAverageLine(normalize(candidate.raw))) continue;
+                float dx = Math.abs(candidate.bounds.exactCenterX() -
+                    marker.bounds.exactCenterX());
+                float dy = Math.abs(candidate.bounds.exactCenterY() -
+                    marker.bounds.exactCenterY());
+                if (dx > width * 0.58f || dy > height * 0.18f) continue;
+                double distance = dy / Math.max(1.0d, height) * 2.0d +
+                    dx / Math.max(1.0d, width);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    best = candidate;
+                }
+            }
+        }
+        return best;
+    }
+
+    private static Candidate[] choosePrimaryThroughputPair(
             List<Candidate> candidates, int width, int height) {
         List<Candidate> eligible = new ArrayList<>();
         for (Candidate candidate : candidates) {
             float cy = candidate.bounds.exactCenterY() / Math.max(1f, height);
             float cx = candidate.bounds.exactCenterX() / Math.max(1f, width);
-            // The small gauge scale lives above the result card. Final values
-            // are rendered in the central/lower result panel.
-            if (cy < 0.30f || cy > 0.74f || cx < 0.28f) continue;
+            if (cy < 0.25f || cy > 0.76f || cx < 0.18f) continue;
             if (looksLikeGaugeScale(candidate, candidates)) continue;
             eligible.add(candidate);
-            if (eligible.size() >= 8) break;
         }
         if (eligible.size() < 2) return new Candidate[]{null, null};
 
-        Candidate first = null;
+        Collections.sort(eligible, Comparator
+            .comparingInt((Candidate candidate) -> candidate.bounds.centerY())
+            .thenComparingInt(candidate -> candidate.bounds.centerX()));
+
+        Candidate first = eligible.get(0);
         Candidate second = null;
-        double best = Double.NEGATIVE_INFINITY;
-        for (int i = 0; i < eligible.size(); i++) {
-            for (int j = i + 1; j < eligible.size(); j++) {
-                Candidate a = eligible.get(i);
-                Candidate b = eligible.get(j);
-                float dy = Math.abs(a.bounds.exactCenterY() - b.bounds.exactCenterY());
-                float dx = Math.abs(a.bounds.exactCenterX() - b.bounds.exactCenterX());
-                double pairScore = a.score + b.score;
-                if (dy <= height * 0.22f) pairScore += 180.0d;
-                if (dx <= width * 0.45f) pairScore += 80.0d;
-                pairScore -= Math.abs(a.bounds.height() - b.bounds.height()) * 8.0d;
-                if (pairScore > best) {
-                    best = pairScore;
-                    first = a;
-                    second = b;
-                }
+        for (int i = 1; i < eligible.size(); i++) {
+            Candidate candidate = eligible.get(i);
+            if (!samePhysicalValue(first, candidate)) {
+                second = candidate;
+                break;
             }
         }
-        if (first == null || second == null) return new Candidate[]{null, null};
-
-        float dy = Math.abs(first.bounds.exactCenterY() - second.bounds.exactCenterY());
-        if (dy <= height * 0.045f) {
-            return first.bounds.centerX() <= second.bounds.centerX()
-                ? new Candidate[]{first, second} : new Candidate[]{second, first};
+        if (second != null &&
+                Math.abs(first.bounds.centerY() - second.bounds.centerY()) <=
+                    height * 0.045f &&
+                first.bounds.centerX() > second.bounds.centerX()) {
+            Candidate swap = first;
+            first = second;
+            second = swap;
         }
-        return first.bounds.centerY() <= second.bounds.centerY()
-            ? new Candidate[]{first, second} : new Candidate[]{second, first};
+        return new Candidate[]{first, second};
+    }
+
+    private static Candidate choosePrimaryLatency(List<Candidate> candidates,
+            Candidate download, Candidate upload, int width, int height) {
+        if (candidates.isEmpty()) return null;
+        List<Candidate> eligible = new ArrayList<>();
+        for (Candidate candidate : candidates) {
+            float cy = candidate.bounds.exactCenterY() / Math.max(1f, height);
+            float cx = candidate.bounds.exactCenterX() / Math.max(1f, width);
+            if (cy < 0.24f || cy > 0.78f || cx < 0.12f) continue;
+            eligible.add(candidate);
+        }
+        if (eligible.isEmpty()) return null;
+
+        Collections.sort(eligible, Comparator.comparingInt(
+            candidate -> candidate.bounds.centerY()));
+        if (upload != null) {
+            Candidate belowUpload = null;
+            for (Candidate candidate : eligible) {
+                if (candidate.bounds.centerY() >= upload.bounds.centerY() - height * 0.04f) {
+                    if (belowUpload == null || candidate.bounds.centerY() < belowUpload.bounds.centerY()) {
+                        belowUpload = candidate;
+                    }
+                }
+            }
+            if (belowUpload != null) return belowUpload;
+        }
+
+        Candidate best = eligible.get(0);
+        for (Candidate candidate : eligible) {
+            if (Math.abs(candidate.bounds.centerY() - best.bounds.centerY()) <=
+                    height * 0.06f && candidate.bounds.centerX() > best.bounds.centerX()) {
+                best = candidate;
+            } else if (candidate.score > best.score + 250.0d) {
+                best = candidate;
+            }
+        }
+        return best;
     }
 
     private static boolean looksLikeGaugeScale(Candidate candidate,
@@ -285,47 +359,12 @@ final class NperfScreenshotResultParser {
         return largerCandidates >= 2;
     }
 
-    private static Candidate firstLatency(List<Candidate> candidates,
-            boolean jitter) {
-        for (Candidate candidate : candidates) {
-            if (jitter && candidate.jitterLabel) return candidate;
-            if (!jitter && candidate.latencyLabel && !candidate.jitterLabel) {
-                return candidate;
-            }
-        }
-        return null;
-    }
-
-    private static Candidate chooseVisualLatency(List<Candidate> candidates,
-            Candidate download, Candidate upload, int height, boolean jitter) {
-        if (candidates.isEmpty()) return null;
-        float minY = 0f;
-        if (download != null) minY = Math.max(minY, download.bounds.exactCenterY());
-        if (upload != null) minY = Math.max(minY, upload.bounds.exactCenterY());
-
-        List<Candidate> eligible = new ArrayList<>();
-        for (Candidate candidate : candidates) {
-            float cy = candidate.bounds.exactCenterY();
-            float normalizedY = cy / Math.max(1f, height);
-            if (normalizedY < 0.30f || normalizedY > 0.76f) continue;
-            if (minY > 0f && cy < minY - height * 0.06f) continue;
-            eligible.add(candidate);
-        }
-        if (eligible.isEmpty()) return null;
-        Collections.sort(eligible, candidateOrder());
-        if (!jitter) return eligible.get(0);
-        return eligible.size() > 1 ? eligible.get(1) : null;
-    }
-
     private static void deduplicate(List<Candidate> candidates) {
         for (int i = candidates.size() - 1; i >= 0; i--) {
             Candidate current = candidates.get(i);
             for (int j = 0; j < i; j++) {
                 Candidate earlier = candidates.get(j);
-                boolean sameValue = current.value.equals(earlier.value);
-                boolean near = Math.abs(current.bounds.centerX() - earlier.bounds.centerX()) < 24 &&
-                    Math.abs(current.bounds.centerY() - earlier.bounds.centerY()) < 24;
-                if (sameValue && near) {
+                if (samePhysicalValue(current, earlier)) {
                     if (current.score > earlier.score) candidates.set(j, current);
                     candidates.remove(i);
                     break;
@@ -334,15 +373,19 @@ final class NperfScreenshotResultParser {
         }
     }
 
+    private static boolean samePhysicalValue(Candidate left, Candidate right) {
+        return left.value.equals(right.value) &&
+            Math.abs(left.bounds.centerX() - right.bounds.centerX()) < 28 &&
+            Math.abs(left.bounds.centerY() - right.bounds.centerY()) < 28;
+    }
+
     private static final class MetricValue {
         final String value;
-
-        MetricValue(String value) {
-            this.value = value;
-        }
+        MetricValue(String value) { this.value = value; }
     }
 
     private static MetricValue parseThroughput(String source) {
+        if (isAverageLine(normalize(source))) return null;
         Matcher valueUnit = THROUGHPUT_VALUE_UNIT.matcher(source);
         if (valueUnit.find()) {
             String value = throughputMbps(valueUnit.group(1), valueUnit.group(2));
@@ -357,6 +400,7 @@ final class NperfScreenshotResultParser {
     }
 
     private static String parseLatency(String source) {
+        if (isAverageLine(normalize(source))) return "";
         Matcher valueUnit = LATENCY_VALUE_UNIT.matcher(source);
         if (valueUnit.find()) return decimal(valueUnit.group(1));
         Matcher unitValue = LATENCY_UNIT_VALUE.matcher(source);
