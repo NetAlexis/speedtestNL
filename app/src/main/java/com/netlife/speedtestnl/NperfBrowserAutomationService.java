@@ -3,6 +3,7 @@ package com.netlife.speedtestnl;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
+import android.annotation.SuppressLint;
 import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.Rect;
@@ -500,6 +501,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     }
 
 
+    @SuppressLint("NewApi")
     private void requestVisualResultOcr(boolean explicitComplete, long now) {
         if (terminalSent || ocrInProgress || ocrAttempts >= MAX_OCR_ATTEMPTS) return;
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
@@ -530,6 +532,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             });
     }
 
+    @SuppressLint("NewApi")
     private void processScreenshotResult(ScreenshotResult screenshotResult,
             boolean explicitComplete) {
         HardwareBuffer buffer = screenshotResult.getHardwareBuffer();
