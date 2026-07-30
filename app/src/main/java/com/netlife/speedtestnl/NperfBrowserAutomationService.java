@@ -32,6 +32,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Accessibility controller for the public nPerf page running in a Custom Tab.
@@ -48,17 +50,20 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     private static final long SESSION_TIMEOUT_MS = 7 * 60 * 1000L;
     private static final long PAGE_READY_DELAY_MS = 2500L;
     private static final long START_RETRY_INTERVAL_MS = 9000L;
-    private static final long START_CONFIRM_TIMEOUT_MS = 35 * 1000L;
+    private static final long START_CONFIRM_TIMEOUT_MS = 90 * 1000L;
     private static final long START_DATA_TIMEOUT_MS = 150 * 1000L;
-    private static final long OCR_START_AFTER_MS = 30 * 1000L;
-    private static final long OCR_RETRY_INTERVAL_MS = 5000L;
+    private static final long OCR_START_AFTER_MS = 18 * 1000L;
+    private static final long OCR_START_WHILE_UNCONFIRMED_MS = 12 * 1000L;
+    private static final long OCR_RETRY_INTERVAL_MS = 7000L;
     private static final long MIN_COMPLETE_AFTER_START_MS = 28 * 1000L;
     private static final long STABLE_RESULT_COMPLETE_MS = 12 * 1000L;
     private static final long STABLE_RESULT_FALLBACK_MIN_MS = 45 * 1000L;
     private static final long ACTION_DEBOUNCE_MS = 1400L;
     private static final long WATCHDOG_INTERVAL_MS = 1800L;
-    private static final int MAX_START_ATTEMPTS = 3;
-    private static final int MAX_OCR_ATTEMPTS = 12;
+    private static final long MIN_INSPECTION_INTERVAL_MS = 900L;
+    private static final int MAX_ACCESSIBILITY_TEXT_LINES = 500;
+    private static final int MAX_START_ATTEMPTS = 1;
+    private static final int MAX_OCR_ATTEMPTS = 10;
 
     private enum Stage {
         WAITING_PAGE,
@@ -69,6 +74,12 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ExecutorService ocrExecutor =
+        Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "SpeedtestNL-nPerfOCR");
+            thread.setPriority(Thread.NORM_PRIORITY - 1);
+            return thread;
+        });
 
     private String token = "";
     private String browserPackage = "";
@@ -87,6 +98,8 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     private boolean locationHandled = false;
     private boolean terminalSent = false;
     private boolean inspecting = false;
+    private boolean inspectionScheduled = false;
+    private long lastInspectionAt = 0L;
     private boolean ocrInProgress = false;
     private boolean lastOcrRequestedAtCompleteScreen = false;
 
@@ -108,7 +121,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         @Override
         public void run() {
             if (!syncSession()) return;
-            inspectActiveWindow();
+            scheduleInspection(0L);
             if (syncSession()) handler.postDelayed(this, WATCHDOG_INTERVAL_MS);
         }
     };
@@ -137,6 +150,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             textRecognizer.close();
             textRecognizer = null;
         }
+        ocrExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -148,12 +162,26 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         String eventPackage = packageValue == null ? "" : packageValue.toString();
         if (!isExpectedBrowser(eventPackage)) return;
 
-        inspectActiveWindow();
+        scheduleInspection(120L);
     }
 
     @Override
     public void onInterrupt() {
         Log.w(TAG, "Accessibility controller interrupted");
+    }
+
+    private void scheduleInspection(long requestedDelayMs) {
+        if (terminalSent || inspectionScheduled || !syncSession()) return;
+        long now = SystemClock.elapsedRealtime();
+        long throttle = Math.max(0L,
+            MIN_INSPECTION_INTERVAL_MS - (now - lastInspectionAt));
+        long delay = Math.max(requestedDelayMs, throttle);
+        inspectionScheduled = true;
+        handler.postDelayed(() -> {
+            inspectionScheduled = false;
+            lastInspectionAt = SystemClock.elapsedRealtime();
+            inspectActiveWindow();
+        }, delay);
     }
 
     private void inspectActiveWindow() {
@@ -199,6 +227,8 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             locationHandled = false;
             terminalSent = false;
             inspecting = false;
+            inspectionScheduled = false;
+            lastInspectionAt = 0L;
             ocrInProgress = false;
             lastOcrRequestedAtCompleteScreen = false;
             ocrAttempts = 0;
@@ -226,6 +256,8 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         firstPageSeenAt = 0L;
         terminalSent = false;
         inspecting = false;
+        inspectionScheduled = false;
+        lastInspectionAt = 0L;
         ocrInProgress = false;
         ocrAttempts = 0;
         ocrStableReads = 0;
@@ -384,6 +416,10 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             long now) {
         NperfBrowserCoordinator.Result sanitized = withoutBaseline(observed);
         boolean newThroughput = hasValidThroughput(sanitized);
+        long sinceFirstRequest = now - firstStartRequestAt;
+        if (sinceFirstRequest >= OCR_START_WHILE_UNCONFIRMED_MS) {
+            requestVisualResultOcr(false, now);
+        }
 
         if (!startVisible) {
             startMissingObservations++;
@@ -410,7 +446,6 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             return;
         }
 
-        long sinceFirstRequest = now - firstStartRequestAt;
         if (startVisible && startAttempts < MAX_START_ATTEMPTS &&
                 now - lastStartAttemptAt >= START_RETRY_INTERVAL_MS) {
             stage = Stage.WAITING_START;
@@ -419,8 +454,14 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         }
 
         if (sinceFirstRequest >= START_CONFIRM_TIMEOUT_MS) {
+            if (ocrInProgress || ocrAttempts < MAX_OCR_ATTEMPTS) {
+                status("OCR_START_VERIFY",
+                    "El nodo Iniciar test sigue visible; verificando el panel final por captura...");
+                requestVisualResultOcr(false, now);
+                return;
+            }
             fail("START_NOT_CONFIRMED",
-                "nPerf no confirmó que el botón Iniciar test hubiera sido activado");
+                "nPerf no mostró un resultado visual verificable después de activar Iniciar test");
             return;
         }
 
@@ -438,8 +479,8 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         boolean throughput = hasValidThroughput(currentResult);
         boolean latencyReady = NperfResultParser.positive(currentResult.latency);
         boolean explicitComplete = containsAny(normalized,
-            "probar de nuevo", "reiniciar test", "restart test", "reiniciar",
-            "compartir resultado", "share result", "compartir",
+            "probar de nuevo", "reiniciar test", "restart test",
+            "compartir resultado", "share result",
             "resultado completo", "test finalizado", "prueba finalizada");
 
         if (!throughput || !latencyReady) {
@@ -514,7 +555,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         status("OCR_CAPTURE", "Leyendo panel final nPerf (" + ocrAttempts + "/" +
             MAX_OCR_ATTEMPTS + ")...");
 
-        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(),
+        takeScreenshot(Display.DEFAULT_DISPLAY, ocrExecutor,
             new TakeScreenshotCallback() {
                 @Override
                 public void onSuccess(@NonNull ScreenshotResult screenshotResult) {
@@ -551,9 +592,21 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         }
 
         if (softwareBitmap == null) {
-            ocrInProgress = false;
-            status("OCR_BITMAP_FAILED", "No se pudo preparar la captura nPerf...");
+            handler.post(() -> {
+                ocrInProgress = false;
+                status("OCR_BITMAP_FAILED", "No se pudo preparar la captura nPerf...");
+            });
             return;
+        }
+
+        Bitmap preparedBitmap = softwareBitmap;
+        if (preparedBitmap.getWidth() > 900) {
+            int scaledHeight = Math.max(1,
+                Math.round(preparedBitmap.getHeight() * 900f / preparedBitmap.getWidth()));
+            Bitmap scaled = Bitmap.createScaledBitmap(
+                preparedBitmap, 900, scaledHeight, true);
+            preparedBitmap.recycle();
+            preparedBitmap = scaled;
         }
 
         if (textRecognizer == null) {
@@ -561,49 +614,55 @@ public class NperfBrowserAutomationService extends AccessibilityService {
                 TextRecognizerOptions.DEFAULT_OPTIONS);
         }
 
-        final Bitmap bitmap = softwareBitmap;
+        final Bitmap bitmap = preparedBitmap;
         final int width = bitmap.getWidth();
         final int height = bitmap.getHeight();
         InputImage image = InputImage.fromBitmap(bitmap, 0);
         textRecognizer.process(image)
-            .addOnSuccessListener(visionText ->
-                handleVisualTextResult(visionText, width, height, explicitComplete))
-            .addOnFailureListener(error -> {
-                Log.e(TAG, "ML Kit could not read nPerf result", error);
-                status("OCR_FAILED", "No se pudo leer el panel nPerf; reintentando...");
+            .addOnSuccessListener(ocrExecutor, visionText -> {
+                List<NperfScreenshotResultParser.Line> lines = new ArrayList<>();
+                for (Text.TextBlock block : visionText.getTextBlocks()) {
+                    for (Text.Line line : block.getLines()) {
+                        Rect bounds = line.getBoundingBox();
+                        if (bounds != null && !line.getText().trim().isEmpty()) {
+                            lines.add(new NperfScreenshotResultParser.Line(
+                                line.getText(), bounds));
+                        }
+                    }
+                }
+                NperfBrowserCoordinator.Result visual =
+                    NperfScreenshotResultParser.parse(lines, width, height);
+                String recognizedText = visionText.getText();
+                boolean positionalComplete = hasVisualCompletionCue(lines, width, height);
+                handler.post(() -> applyVisualTextResult(visual, recognizedText,
+                    explicitComplete || positionalComplete));
             })
-            .addOnCompleteListener(task -> {
+            .addOnFailureListener(ocrExecutor, error -> {
+                Log.e(TAG, "ML Kit could not read nPerf result", error);
+                handler.post(() -> status("OCR_FAILED",
+                    "No se pudo leer el panel nPerf; reintentando..."));
+            })
+            .addOnCompleteListener(ocrExecutor, task -> {
                 bitmap.recycle();
-                ocrInProgress = false;
+                handler.post(() -> ocrInProgress = false);
             });
     }
 
-    private void handleVisualTextResult(Text visionText, int width, int height,
-            boolean explicitComplete) {
+    private void applyVisualTextResult(NperfBrowserCoordinator.Result visual,
+            String recognizedText, boolean visualComplete) {
         if (terminalSent || !syncSession()) return;
-
-        List<NperfScreenshotResultParser.Line> lines = new ArrayList<>();
-        for (Text.TextBlock block : visionText.getTextBlocks()) {
-            for (Text.Line line : block.getLines()) {
-                Rect bounds = line.getBoundingBox();
-                if (bounds != null && !line.getText().trim().isEmpty()) {
-                    lines.add(new NperfScreenshotResultParser.Line(
-                        line.getText(), bounds));
-                }
-            }
-        }
-
-        NperfBrowserCoordinator.Result visual =
-            NperfScreenshotResultParser.parse(lines, width, height);
         if (!NperfResultParser.hasRequiredMetrics(visual)) {
             ocrStableReads = 0;
             lastOcrSignature = "";
-            status("OCR_NO_METRICS", "La captura no mostró aún descarga, subida y latencia verificables...");
+            status("OCR_NO_METRICS",
+                "La captura no mostró aún descarga, subida y latencia verificables...");
             Log.i(TAG, "OCR did not produce required nPerf metrics. Text=" +
-                visionText.getText().replace('\n', ' '));
+                (recognizedText == null ? "" : recognizedText.replace('\n', ' ')));
             return;
         }
 
+        long now = SystemClock.elapsedRealtime();
+        ensureRunningForVisualResult(now);
         String signature = visual.download + "|" + visual.upload + "|" +
             visual.latency + "|" + visual.jitter;
         if (signature.equals(lastOcrSignature)) {
@@ -613,20 +672,47 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             ocrStableReads = 1;
         }
 
-        boolean visualComplete = explicitComplete || containsAny(
-            normalize(visionText.getText()), "compartir", "share", "reiniciar",
-            "restart", "probar de nuevo");
         status("OCR_RESULT", "Lectura visual nPerf: ↓ " + visual.download +
             " Mb/s · ↑ " + visual.upload + " Mb/s · Latencia " +
             visual.latency + " ms" + (ocrStableReads >= 2 ? " ✓" : ""));
 
-        if (visualComplete || ocrStableReads >= 2) {
+        long elapsedFromStart = firstStartRequestAt == 0L ? 0L :
+            now - firstStartRequestAt;
+        if (elapsedFromStart >= MIN_COMPLETE_AFTER_START_MS &&
+                (visualComplete || ocrStableReads >= 2)) {
             mergeValidatedMetrics(currentResult, visual);
-            resultStableAt = SystemClock.elapsedRealtime() -
-                STABLE_RESULT_COMPLETE_MS;
+            resultStableAt = now - STABLE_RESULT_COMPLETE_MS;
             stage = Stage.RESULT_CANDIDATE;
             complete();
         }
+    }
+
+    private void ensureRunningForVisualResult(long now) {
+        if (startConfirmedAt != 0L) return;
+        startConfirmedAt = firstStartRequestAt > 0L ? firstStartRequestAt : now;
+        stage = Stage.RUNNING;
+        status("START_CONFIRMED_VISUALLY",
+            "nPerf confirmado por el panel visual; validando resultado...");
+    }
+
+    private boolean hasVisualCompletionCue(
+            List<NperfScreenshotResultParser.Line> lines, int width, int height) {
+        if (lines == null || width <= 0 || height <= 0) return false;
+        for (NperfScreenshotResultParser.Line line : lines) {
+            if (line == null || line.bounds == null || line.bounds.isEmpty()) continue;
+            float cx = line.bounds.exactCenterX() / Math.max(1f, width);
+            float cy = line.bounds.exactCenterY() / Math.max(1f, height);
+            // Ignore Chrome's toolbar share icon and bottom browser controls.
+            if (cy < 0.12f || cy > 0.82f || cx < 0.12f || cx > 0.92f) continue;
+            String value = normalize(line.text);
+            if (containsAny(value, "probar de nuevo", "reiniciar test",
+                    "restart test", "share result", "compartir resultado") ||
+                    ((value.equals("compartir") || value.equals("share")) &&
+                     cy > 0.18f && cy < 0.62f)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean containsDataFailure(String normalized) {
@@ -829,7 +915,8 @@ public class NperfBrowserAutomationService extends AccessibilityService {
 
     private void collectText(AccessibilityNodeInfo node,
             List<String> output, int depth) {
-        if (node == null || depth > 45 || output.size() > 1800) return;
+        if (node == null || depth > 30 ||
+                output.size() >= MAX_ACCESSIBILITY_TEXT_LINES) return;
 
         String text = value(node.getText());
         String description = value(node.getContentDescription());
