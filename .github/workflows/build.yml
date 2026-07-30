@@ -25,7 +25,6 @@ jobs:
           fetch-depth: 0
 
       - name: Apply guarded dialog correction
-        if: github.ref == 'refs/heads/agent/custom-tab-nperf-automation'
         run: |
           python3 scripts/fix_custom_tab_dialog.py
           git diff --check
