@@ -100,10 +100,9 @@ main = replace_once(
     "TXT mandatory Speedtest identity",
 )
 
-# Defensive URL normalization: only preserve a Speedtest result URL that yielded an ID.
 main = replace_once(
     main,
-    '''    private void completeSpeedtestFromUrl(String url) {
+    r'''    private void completeSpeedtestFromUrl(String url) {
         if (url != null) {
             Matcher matcher = Pattern.compile("result/([\\w-]+)").matcher(url);
             if (matcher.find()) resultId = matcher.group(1);
@@ -112,7 +111,7 @@ main = replace_once(
         completeSpeedtest();
     }
 ''',
-    '''    private void completeSpeedtestFromUrl(String url) {
+    r'''    private void completeSpeedtestFromUrl(String url) {
         if (url != null) {
             Matcher matcher = Pattern.compile("/result/([\\w-]+)(?:/|$)").matcher(url);
             if (matcher.find()) {
