@@ -15,40 +15,79 @@ import android.view.accessibility.AccessibilityNodeInfo;
 
 import java.text.Normalizer;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Deterministic accessibility controller for the public nPerf page running in
- * a Custom Tab. It remains inert unless NperfBrowserCoordinator has an active
- * token and ignores every package except the selected browser.
+ * Accessibility controller for the public nPerf page running in a Custom Tab.
+ *
+ * The controller is intentionally conservative: it cannot complete a session
+ * until it has submitted a start action, observed that the start control is no
+ * longer active, waited for a realistic test duration, and received download
+ * and upload values that were not already visible before the test started.
  */
 public class NperfBrowserAutomationService extends AccessibilityService {
 
     private static final String TAG = "SpeedtestNL-nPerfTab";
+
     private static final long SESSION_TIMEOUT_MS = 7 * 60 * 1000L;
-    private static final long START_DATA_TIMEOUT_MS = 50 * 1000L;
-    private static final long RESULT_STABLE_MS = 8 * 1000L;
-    private static final long ACTION_DEBOUNCE_MS = 1800L;
+    private static final long PAGE_READY_DELAY_MS = 2500L;
+    private static final long START_RETRY_INTERVAL_MS = 9000L;
+    private static final long START_CONFIRM_TIMEOUT_MS = 35 * 1000L;
+    private static final long START_DATA_TIMEOUT_MS = 90 * 1000L;
+    private static final long MIN_COMPLETE_AFTER_START_MS = 28 * 1000L;
+    private static final long STABLE_RESULT_COMPLETE_MS = 12 * 1000L;
+    private static final long STABLE_RESULT_FALLBACK_MIN_MS = 45 * 1000L;
+    private static final long ACTION_DEBOUNCE_MS = 1400L;
+    private static final long WATCHDOG_INTERVAL_MS = 1800L;
+    private static final int MAX_START_ATTEMPTS = 3;
+
+    private enum Stage {
+        WAITING_PAGE,
+        WAITING_START,
+        START_REQUESTED,
+        RUNNING,
+        RESULT_CANDIDATE
+    }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+
     private String token = "";
     private String browserPackage = "";
     private long sessionStarted = 0L;
-    private long startActionAt = 0L;
+    private long firstPageSeenAt = 0L;
     private long lastActionAt = 0L;
+    private long firstStartRequestAt = 0L;
+    private long lastStartAttemptAt = 0L;
+    private long startConfirmedAt = 0L;
     private long resultStableAt = 0L;
-    private String lastResultSignature = "";
+
+    private int startAttempts = 0;
+    private int startMissingObservations = 0;
+
     private boolean consentHandled = false;
     private boolean locationHandled = false;
-    private boolean startActivated = false;
-    private boolean fallbackTapSent = false;
     private boolean terminalSent = false;
+    private boolean inspecting = false;
+
+    private Stage stage = Stage.WAITING_PAGE;
+    private String lastResultSignature = "";
+
+    private NperfBrowserCoordinator.Result baselineResult =
+        new NperfBrowserCoordinator.Result();
     private NperfBrowserCoordinator.Result currentResult =
         new NperfBrowserCoordinator.Result();
+
+    private final Runnable watchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (!syncSession()) return;
+            inspectActiveWindow();
+            if (syncSession()) handler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+        }
+    };
 
     @Override
     protected void onServiceConnected() {
@@ -71,25 +110,32 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         String eventPackage = packageValue == null ? "" : packageValue.toString();
         if (!isExpectedBrowser(eventPackage)) return;
 
-        long elapsed = SystemClock.elapsedRealtime() - sessionStarted;
-        if (elapsed > SESSION_TIMEOUT_MS) {
-            fail("SESSION_TIMEOUT",
-                "nPerf no completó la prueba dentro del tiempo máximo");
-            return;
-        }
-
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return;
-        try {
-            inspect(root);
-        } finally {
-            root.recycle();
-        }
+        inspectActiveWindow();
     }
 
     @Override
     public void onInterrupt() {
         Log.w(TAG, "Accessibility controller interrupted");
+    }
+
+    private void inspectActiveWindow() {
+        if (inspecting || terminalSent || !syncSession()) return;
+        inspecting = true;
+        AccessibilityNodeInfo root = null;
+        try {
+            long elapsed = SystemClock.elapsedRealtime() - sessionStarted;
+            if (elapsed > SESSION_TIMEOUT_MS) {
+                fail("SESSION_TIMEOUT",
+                    "nPerf no completó la prueba dentro del tiempo máximo");
+                return;
+            }
+
+            root = getRootInActiveWindow();
+            if (root != null) inspect(root);
+        } finally {
+            if (root != null) root.recycle();
+            inspecting = false;
+        }
     }
 
     private boolean syncSession() {
@@ -103,16 +149,25 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             token = activeToken;
             browserPackage = NperfBrowserCoordinator.getBrowserPackage(this);
             sessionStarted = NperfBrowserCoordinator.getStartedElapsed(this);
-            startActionAt = 0L;
+            firstPageSeenAt = 0L;
             lastActionAt = 0L;
+            firstStartRequestAt = 0L;
+            lastStartAttemptAt = 0L;
+            startConfirmedAt = 0L;
             resultStableAt = 0L;
-            lastResultSignature = "";
+            startAttempts = 0;
+            startMissingObservations = 0;
             consentHandled = false;
             locationHandled = false;
-            startActivated = false;
-            fallbackTapSent = false;
             terminalSent = false;
+            inspecting = false;
+            stage = Stage.WAITING_PAGE;
+            lastResultSignature = "";
+            baselineResult = new NperfBrowserCoordinator.Result();
             currentResult = new NperfBrowserCoordinator.Result();
+
+            handler.removeCallbacks(watchdog);
+            handler.postDelayed(watchdog, 800L);
             Log.i(TAG, "New nPerf browser session " + token +
                 " package=" + browserPackage);
         }
@@ -120,15 +175,19 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     }
 
     private void resetLocalSession() {
+        handler.removeCallbacks(watchdog);
         token = "";
         browserPackage = "";
         sessionStarted = 0L;
+        firstPageSeenAt = 0L;
         terminalSent = false;
+        inspecting = false;
     }
 
     private boolean isExpectedBrowser(String packageName) {
         if (packageName == null || packageName.isEmpty()) return false;
         if (!browserPackage.isEmpty()) return browserPackage.equals(packageName);
+
         boolean known = packageName.equals("com.android.chrome") ||
             packageName.equals("com.sec.android.app.sbrowser") ||
             packageName.equals("com.microsoft.emmx") ||
@@ -148,184 +207,412 @@ public class NperfBrowserAutomationService extends AccessibilityService {
 
         if (!looksLikeNperf(normalized)) return;
 
-        String dataFailure = firstContaining(normalized,
+        long now = SystemClock.elapsedRealtime();
+        if (firstPageSeenAt == 0L) firstPageSeenAt = now;
+        if (stage == Stage.WAITING_PAGE &&
+                now - firstPageSeenAt >= PAGE_READY_DELAY_MS) {
+            stage = Stage.WAITING_START;
+        }
+
+        if (handleConsent(root, normalized)) return;
+        if (handleLocation(root, normalized)) return;
+
+        boolean startVisible = hasStartControl(root);
+        NperfBrowserCoordinator.Result observed = extractStrictResult(lines, joined);
+
+        // Capture the page's static/promotional numbers before any start action.
+        // They are never allowed to become the final test result.
+        if (firstStartRequestAt == 0L) {
+            baselineResult.merge(observed);
+        }
+
+        if (firstStartRequestAt > 0L && containsDataFailure(normalized)) {
+            fail("DATA_CHANNEL_FAILURE",
+                "nPerf no pudo recibir datos del servidor de medición");
+            return;
+        }
+
+        switch (stage) {
+            case WAITING_PAGE:
+                status("WAITING_PAGE", "Esperando que nPerf prepare el medidor...");
+                return;
+
+            case WAITING_START:
+                requestStartIfPossible(root, startVisible, now);
+                return;
+
+            case START_REQUESTED:
+                handleStartRequested(root, startVisible, observed, now);
+                return;
+
+            case RUNNING:
+            case RESULT_CANDIDATE:
+                handleRunning(normalized, observed, now);
+                return;
+
+            default:
+                return;
+        }
+    }
+
+    private boolean handleConsent(AccessibilityNodeInfo root, String normalized) {
+        if (consentHandled || !containsAny(normalized,
+                "politica de uso de cookies", "cookie policy",
+                "cookies y privacidad", "cookies and privacy")) {
+            return false;
+        }
+
+        if (activateTextControl(root, true, "CONSENT",
+                "ok", "aceptar", "accept", "agree", "continuar")) {
+            consentHandled = true;
+            status("CONSENT", "Aceptando cookies nPerf...");
+            return true;
+        }
+        return false;
+    }
+
+    private boolean handleLocation(AccessibilityNodeInfo root, String normalized) {
+        if (locationHandled || !containsAny(normalized,
+                "usar tu ubicacion", "acceder a tu ubicacion",
+                "use your location", "access your location") ||
+                !containsAny(normalized, "nperf", "nperf.com")) {
+            return false;
+        }
+
+        if (activateTextControl(root, false, "LOCATION",
+                "permitir", "allow", "while using the app",
+                "mientras se usa la aplicacion")) {
+            locationHandled = true;
+            status("LOCATION", "Ubicación web de nPerf autorizada...");
+            return true;
+        }
+        return false;
+    }
+
+    private void requestStartIfPossible(AccessibilityNodeInfo root,
+            boolean startVisible, long now) {
+        if (startAttempts >= MAX_START_ATTEMPTS) {
+            if (firstStartRequestAt > 0L &&
+                    now - firstStartRequestAt >= START_CONFIRM_TIMEOUT_MS) {
+                fail("START_NOT_CONFIRMED",
+                    "nPerf mantuvo visible Iniciar test después de " +
+                    MAX_START_ATTEMPTS + " intentos controlados");
+            }
+            return;
+        }
+
+        if (lastStartAttemptAt > 0L &&
+                now - lastStartAttemptAt < START_RETRY_INTERVAL_MS) {
+            status("START_WAIT",
+                "Esperando confirmación del inicio de nPerf...");
+            return;
+        }
+
+        if (startVisible) {
+            AccessibilityNodeInfo startNode = findTextNode(root, false,
+                new String[]{"iniciar test", "iniciar prueba", "start test",
+                    "lancer le test"}, 0);
+            if (startNode != null) {
+                try {
+                    if (activateStartNode(startNode)) return;
+                } finally {
+                    startNode.recycle();
+                }
+            }
+        }
+
+        long pageElapsed = now - firstPageSeenAt;
+        if (pageElapsed >= 7000L) {
+            dispatchFallbackStartTap();
+        } else {
+            status("WAITING", "Buscando el control Iniciar test de nPerf...");
+        }
+    }
+
+    private void handleStartRequested(AccessibilityNodeInfo root,
+            boolean startVisible,
+            NperfBrowserCoordinator.Result observed,
+            long now) {
+        NperfBrowserCoordinator.Result sanitized = withoutBaseline(observed);
+        boolean newThroughput = hasValidThroughput(sanitized);
+
+        if (!startVisible) {
+            startMissingObservations++;
+        } else {
+            startMissingObservations = 0;
+        }
+
+        boolean confirmedByDisappearance = startMissingObservations >= 2 &&
+            now - lastStartAttemptAt >= 1500L;
+        boolean confirmedByLiveData = newThroughput &&
+            now - lastStartAttemptAt >= 3000L;
+
+        if (confirmedByDisappearance || confirmedByLiveData) {
+            stage = Stage.RUNNING;
+            startConfirmedAt = now;
+            currentResult = new NperfBrowserCoordinator.Result();
+            if (newThroughput) currentResult.merge(sanitized);
+            resultStableAt = 0L;
+            lastResultSignature = "";
+            status("START_CONFIRMED",
+                "nPerf confirmó el inicio; esperando descarga y subida...");
+            Log.i(TAG, "nPerf start confirmed. disappearance=" +
+                confirmedByDisappearance + " data=" + confirmedByLiveData);
+            return;
+        }
+
+        long sinceFirstRequest = now - firstStartRequestAt;
+        if (startVisible && startAttempts < MAX_START_ATTEMPTS &&
+                now - lastStartAttemptAt >= START_RETRY_INTERVAL_MS) {
+            stage = Stage.WAITING_START;
+            requestStartIfPossible(root, true, now);
+            return;
+        }
+
+        if (sinceFirstRequest >= START_CONFIRM_TIMEOUT_MS) {
+            fail("START_NOT_CONFIRMED",
+                "nPerf no confirmó que el botón Iniciar test hubiera sido activado");
+            return;
+        }
+
+        status("START_REQUESTED",
+            "Activación enviada; verificando que nPerf realmente inicie...");
+    }
+
+    private void handleRunning(String normalized,
+            NperfBrowserCoordinator.Result observed,
+            long now) {
+        NperfBrowserCoordinator.Result sanitized = withoutBaseline(observed);
+        if (hasValidThroughput(sanitized)) currentResult.merge(sanitized);
+
+        long sinceConfirmed = now - startConfirmedAt;
+        boolean throughput = hasValidThroughput(currentResult);
+
+        if (!throughput) {
+            if (sinceConfirmed >= START_DATA_TIMEOUT_MS) {
+                fail("START_DATA_TIMEOUT",
+                    "nPerf confirmó el inicio, pero no produjo descarga y subida");
+                return;
+            }
+            status("RUNNING",
+                "nPerf iniciado; esperando datos reales de descarga y subida...");
+            return;
+        }
+
+        String signature = currentResult.download + "|" +
+            currentResult.upload + "|" + currentResult.latency + "|" +
+            currentResult.jitter + "|" + currentResult.resultId + "|" +
+            currentResult.resultUrl;
+        if (!signature.equals(lastResultSignature)) {
+            lastResultSignature = signature;
+            resultStableAt = now;
+        }
+
+        stage = Stage.RESULT_CANDIDATE;
+        status("RESULT_CANDIDATE", "nPerf: ↓ " + currentResult.download +
+            " Mb/s · ↑ " + currentResult.upload +
+            " Mb/s; verificando finalización...");
+
+        boolean explicitComplete = containsAny(normalized,
+            "probar de nuevo", "reiniciar test", "restart test",
+            "compartir resultado", "share result", "resultado completo",
+            "test finalizado", "prueba finalizada");
+        boolean resultIdentity = !currentResult.resultId.isEmpty() ||
+            isNperfResultUrl(currentResult.resultUrl);
+        boolean minimumDuration = sinceConfirmed >= MIN_COMPLETE_AFTER_START_MS;
+        boolean stableLongEnough = resultStableAt > 0L &&
+            now - resultStableAt >= STABLE_RESULT_COMPLETE_MS;
+        boolean fallbackDuration = sinceConfirmed >= STABLE_RESULT_FALLBACK_MIN_MS;
+
+        if (minimumDuration &&
+                ((explicitComplete && stableLongEnough) ||
+                 (resultIdentity && stableLongEnough) ||
+                 (fallbackDuration && stableLongEnough))) {
+            complete();
+        }
+    }
+
+    private boolean containsDataFailure(String normalized) {
+        return containsAny(normalized,
             "no se pueden recibir datos",
             "no se pudo recibir datos",
             "compruebe su conexion a internet antes de iniciar un test",
             "cannot receive data",
             "unable to receive data",
             "no data received");
-        if (!dataFailure.isEmpty()) {
-            fail("DATA_CHANNEL_FAILURE",
-                "nPerf no pudo recibir datos del servidor de medición");
-            return;
-        }
-
-        if (!consentHandled && containsAny(normalized,
-                "politica de uso de cookies", "cookie policy",
-                "cookies y privacidad", "cookies and privacy")) {
-            if (clickText(root, true,
-                    "ok", "aceptar", "accept", "agree", "continuar")) {
-                consentHandled = true;
-                status("CONSENT", "Aceptando cookies nPerf...");
-                return;
-            }
-        }
-
-        if (!locationHandled && containsAny(normalized,
-                "usar tu ubicacion", "acceder a tu ubicacion",
-                "use your location", "access your location") &&
-                containsAny(normalized, "nperf", "nperf.com")) {
-            if (clickText(root, false,
-                    "permitir", "allow", "while using the app",
-                    "mientras se usa la aplicacion")) {
-                locationHandled = true;
-                status("LOCATION", "Ubicación web de nPerf autorizada...");
-                return;
-            }
-        }
-
-        NperfBrowserCoordinator.Result observed = extractResult(lines, joined);
-        currentResult.merge(observed);
-        boolean throughput = currentResult.hasThroughput();
-        boolean latencyOnly = !throughput &&
-            (!currentResult.latency.isEmpty() || !currentResult.jitter.isEmpty());
-
-        if (throughput) {
-            String signature = currentResult.download + "|" +
-                currentResult.upload + "|" + currentResult.latency + "|" +
-                currentResult.jitter;
-            long now = SystemClock.elapsedRealtime();
-            if (!signature.equals(lastResultSignature)) {
-                lastResultSignature = signature;
-                resultStableAt = now;
-            }
-            status("RUNNING", "nPerf: ↓ " + currentResult.download +
-                " Mb/s · ↑ " + currentResult.upload + " Mb/s");
-
-            boolean explicitComplete = containsAny(normalized,
-                "probar de nuevo", "reiniciar test", "restart test",
-                "compartir resultado", "share result", "resultado completo");
-            if (explicitComplete || now - resultStableAt >= RESULT_STABLE_MS) {
-                complete();
-            }
-            return;
-        }
-
-        if (latencyOnly) {
-            status("LATENCY", "nPerf midiendo latencia; esperando descarga...");
-        }
-
-        boolean startVisible = containsAny(normalized,
-            "iniciar test", "iniciar prueba", "start test", "lancer le test");
-
-        if (!startActivated && startVisible) {
-            if (clickText(root, false,
-                    "iniciar test", "iniciar prueba", "start test",
-                    "lancer le test")) {
-                markStartActivated("START_NODE");
-                return;
-            }
-        }
-
-        long elapsed = SystemClock.elapsedRealtime() - sessionStarted;
-        if (!startActivated && !fallbackTapSent && elapsed >= 7000L &&
-                containsAny(normalized, "speed test", "prueba de velocidad")) {
-            fallbackTapSent = true;
-            dispatchMeterTap();
-            return;
-        }
-
-        if (startActivated) {
-            long sinceStart = SystemClock.elapsedRealtime() - startActionAt;
-            if (sinceStart >= START_DATA_TIMEOUT_MS) {
-                fail("START_DATA_TIMEOUT",
-                    latencyOnly
-                        ? "nPerf obtuvo latencia, pero no inició descarga ni subida"
-                        : "nPerf recibió la activación, pero no inició la transferencia de datos");
-                return;
-            }
-            status("CONNECTING",
-                latencyOnly
-                    ? "nPerf midiendo latencia; esperando descarga..."
-                    : "nPerf iniciado; esperando conexión con el servidor...");
-        } else {
-            status("WAITING", "Buscando el control Iniciar test de nPerf...");
-        }
     }
 
-    private void markStartActivated(String source) {
-        startActivated = true;
-        startActionAt = SystemClock.elapsedRealtime();
-        status("STARTED", "Iniciar test activado; esperando datos de nPerf...");
-        Log.i(TAG, "nPerf start activated by " + source);
-    }
-
-    private void dispatchMeterTap() {
-        long now = SystemClock.elapsedRealtime();
-        if (now - lastActionAt < ACTION_DEBOUNCE_MS) return;
-        lastActionAt = now;
-
-        DisplayMetrics metrics = getResources().getDisplayMetrics();
-        float x = metrics.widthPixels * 0.50f;
-        float y = metrics.heightPixels * 0.43f;
-        Path path = new Path();
-        path.moveTo(x, y);
-        GestureDescription gesture = new GestureDescription.Builder()
-            .addStroke(new GestureDescription.StrokeDescription(path, 0L, 120L))
-            .build();
-
-        status("START_FALLBACK", "Activando el medidor nPerf...");
-        dispatchGesture(gesture, new GestureResultCallback() {
-            @Override
-            public void onCompleted(GestureDescription gestureDescription) {
-                markStartActivated("SCREEN_GESTURE");
-            }
-
-            @Override
-            public void onCancelled(GestureDescription gestureDescription) {
-                fail("START_GESTURE_CANCELLED",
-                    "Android canceló el toque sobre Iniciar test");
-            }
-        }, handler);
-    }
-
-    private boolean clickText(AccessibilityNodeInfo root, boolean exact,
-            String... candidates) {
-        long now = SystemClock.elapsedRealtime();
-        if (now - lastActionAt < ACTION_DEBOUNCE_MS) return false;
-        AccessibilityNodeInfo node = findTextNode(root, exact, candidates, 0);
+    private boolean hasStartControl(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo node = findTextNode(root, false,
+            new String[]{"iniciar test", "iniciar prueba", "start test",
+                "lancer le test"}, 0);
         if (node == null) return false;
         try {
-            AccessibilityNodeInfo current = node;
-            for (int depth = 0; current != null && depth < 7; depth++) {
-                if (current.isClickable() && current.isEnabled() &&
-                        current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    lastActionAt = now;
-                    return true;
-                }
-                AccessibilityNodeInfo parent = current.getParent();
-                if (current != node) current.recycle();
-                current = parent;
-            }
-            return node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            return node.isVisibleToUser();
         } finally {
             node.recycle();
         }
     }
 
+    private boolean activateStartNode(AccessibilityNodeInfo node) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastActionAt < ACTION_DEBOUNCE_MS) return false;
+
+        if (performClickOnNodeOrParent(node)) {
+            markStartRequested("ACCESSIBILITY_CLICK");
+            return true;
+        }
+
+        Rect bounds = bestTapBounds(node);
+        if (!isUsableBounds(bounds)) return false;
+        return dispatchTap(bounds.centerX(), bounds.centerY(),
+            "START_TEXT_BOUNDS", true);
+    }
+
+    private void dispatchFallbackStartTap() {
+        if (startAttempts >= MAX_START_ATTEMPTS) return;
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastActionAt < ACTION_DEBOUNCE_MS) return;
+
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        float[] verticalFractions = {0.39f, 0.43f, 0.47f};
+        int index = Math.min(startAttempts, verticalFractions.length - 1);
+        float x = metrics.widthPixels * 0.50f;
+        float y = metrics.heightPixels * verticalFractions[index];
+        dispatchTap(x, y, "START_FALLBACK_" + (index + 1), true);
+    }
+
+    private boolean activateTextControl(AccessibilityNodeInfo root,
+            boolean exact, String source, String... candidates) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastActionAt < ACTION_DEBOUNCE_MS) return false;
+
+        AccessibilityNodeInfo node = findTextNode(root, exact, candidates, 0);
+        if (node == null) return false;
+        try {
+            if (performClickOnNodeOrParent(node)) {
+                lastActionAt = now;
+                return true;
+            }
+            Rect bounds = bestTapBounds(node);
+            return isUsableBounds(bounds) &&
+                dispatchTap(bounds.centerX(), bounds.centerY(), source, false);
+        } finally {
+            node.recycle();
+        }
+    }
+
+    private boolean performClickOnNodeOrParent(AccessibilityNodeInfo node) {
+        AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(node);
+        try {
+            for (int depth = 0; current != null && depth < 8; depth++) {
+                if (current.isVisibleToUser() && current.isEnabled() &&
+                        current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    lastActionAt = SystemClock.elapsedRealtime();
+                    return true;
+                }
+                AccessibilityNodeInfo parent = current.getParent();
+                current.recycle();
+                current = parent;
+            }
+            return false;
+        } finally {
+            if (current != null) current.recycle();
+        }
+    }
+
+    private Rect bestTapBounds(AccessibilityNodeInfo node) {
+        Rect best = new Rect();
+        AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(node);
+        try {
+            for (int depth = 0; current != null && depth < 7; depth++) {
+                Rect candidate = new Rect();
+                current.getBoundsInScreen(candidate);
+                if (isUsableBounds(candidate) &&
+                        (best.isEmpty() || candidate.width() * candidate.height() >
+                            best.width() * best.height())) {
+                    best.set(candidate);
+                }
+                AccessibilityNodeInfo parent = current.getParent();
+                current.recycle();
+                current = parent;
+            }
+        } finally {
+            if (current != null) current.recycle();
+        }
+        return best;
+    }
+
+    private boolean isUsableBounds(Rect bounds) {
+        if (bounds == null || bounds.isEmpty()) return false;
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        return bounds.centerX() >= 0 && bounds.centerX() <= metrics.widthPixels &&
+            bounds.centerY() >= 0 && bounds.centerY() <= metrics.heightPixels &&
+            bounds.width() >= 12 && bounds.height() >= 12;
+    }
+
+    private boolean dispatchTap(float x, float y,
+            final String source, final boolean startAction) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastActionAt < ACTION_DEBOUNCE_MS) return false;
+        lastActionAt = now;
+
+        Path path = new Path();
+        path.moveTo(x, y);
+        GestureDescription gesture = new GestureDescription.Builder()
+            .addStroke(new GestureDescription.StrokeDescription(path, 0L, 140L))
+            .build();
+
+        if (startAction) {
+            status("START_ACTION", "Activando Iniciar test de nPerf...");
+        }
+
+        boolean accepted = dispatchGesture(gesture, new GestureResultCallback() {
+            @Override
+            public void onCompleted(GestureDescription gestureDescription) {
+                if (startAction) markStartRequested(source);
+            }
+
+            @Override
+            public void onCancelled(GestureDescription gestureDescription) {
+                if (startAction && startAttempts >= MAX_START_ATTEMPTS) {
+                    fail("START_GESTURE_CANCELLED",
+                        "Android canceló el toque sobre Iniciar test");
+                }
+            }
+        }, handler);
+
+        if (!accepted) lastActionAt = 0L;
+        return accepted;
+    }
+
+    private void markStartRequested(String source) {
+        long now = SystemClock.elapsedRealtime();
+        startAttempts++;
+        if (firstStartRequestAt == 0L) firstStartRequestAt = now;
+        lastStartAttemptAt = now;
+        startMissingObservations = 0;
+        stage = Stage.START_REQUESTED;
+        status("START_REQUESTED", "Activación " + startAttempts + "/" +
+            MAX_START_ATTEMPTS + " enviada; verificando inicio real...");
+        Log.i(TAG, "nPerf start request " + startAttempts + " by " + source);
+    }
+
     private AccessibilityNodeInfo findTextNode(AccessibilityNodeInfo node,
             boolean exact, String[] candidates, int depth) {
-        if (node == null || depth > 40) return null;
+        if (node == null || depth > 45) return null;
+
         String text = normalize(value(node.getText()) + " " +
             value(node.getContentDescription()));
         for (String candidate : candidates) {
             String expected = normalize(candidate);
-            if ((exact && text.equals(expected)) ||
-                    (!exact && text.contains(expected))) {
+            if (((exact && text.equals(expected)) ||
+                    (!exact && text.contains(expected))) &&
+                    node.isVisibleToUser()) {
                 return AccessibilityNodeInfo.obtain(node);
             }
         }
+
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child == null) continue;
@@ -342,11 +629,14 @@ public class NperfBrowserAutomationService extends AccessibilityService {
 
     private void collectText(AccessibilityNodeInfo node,
             List<String> output, int depth) {
-        if (node == null || depth > 40 || output.size() > 1500) return;
+        if (node == null || depth > 45 || output.size() > 1800) return;
+
         String text = value(node.getText());
         String description = value(node.getContentDescription());
         if (!text.isEmpty()) output.add(text);
-        if (!description.isEmpty() && !description.equals(text)) output.add(description);
+        if (!description.isEmpty() && !description.equals(text)) {
+            output.add(description);
+        }
         String viewId = node.getViewIdResourceName();
         if (viewId != null && !viewId.isEmpty()) output.add(viewId);
 
@@ -361,18 +651,28 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         }
     }
 
-    private NperfBrowserCoordinator.Result extractResult(
+    private NperfBrowserCoordinator.Result extractStrictResult(
             List<String> lines, String joined) {
         NperfBrowserCoordinator.Result result =
             NperfBrowserCoordinator.parseSharedText(joined);
+
+        // Only accept adjacent values when the value itself carries a unit.
+        // This prevents numbers from advertising cards, server lists or the
+        // speedometer scale from being interpreted as test results.
         result.download = prefer(result.download,
-            metricNearLabel(lines, "download", "descarga", "bajada"));
+            metricNearLabelWithUnit(lines,
+                new String[]{"download", "descarga", "bajada"},
+                "(?:mbps|mb/s|mbit/s|gbps|gb/s|gbit/s)"));
         result.upload = prefer(result.upload,
-            metricNearLabel(lines, "upload", "subida", "carga"));
+            metricNearLabelWithUnit(lines,
+                new String[]{"upload", "subida", "carga"},
+                "(?:mbps|mb/s|mbit/s|gbps|gb/s|gbit/s)"));
         result.latency = prefer(result.latency,
-            metricNearLabel(lines, "latency", "latencia", "ping"));
+            metricNearLabelWithUnit(lines,
+                new String[]{"latency", "latencia", "ping"}, "ms"));
         result.jitter = prefer(result.jitter,
-            metricNearLabel(lines, "jitter"));
+            metricNearLabelWithUnit(lines,
+                new String[]{"jitter"}, "ms"));
 
         for (String line : lines) {
             String normalized = normalize(line);
@@ -384,35 +684,79 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             }
             if (result.resultId.isEmpty()) {
                 Matcher matcher = Pattern.compile(
-                    "(?i)(?:result(?:ado)?\\s*id|id de resultado)\\D{0,8}([A-Za-z0-9_-]{5,})")
-                    .matcher(line);
+                    "(?i)(?:result(?:ado)?\\s*id|id de resultado)\\D{0,8}" +
+                    "([A-Za-z0-9_-]{5,})").matcher(line);
                 if (matcher.find()) result.resultId = matcher.group(1);
             }
         }
         return result;
     }
 
-    private String metricNearLabel(List<String> lines, String... labels) {
+    private String metricNearLabelWithUnit(List<String> lines,
+            String[] labels, String unitRegex) {
+        Pattern valuePattern = Pattern.compile(
+            "(?i)([0-9]+(?:[.,][0-9]+)?)\\s*" + unitRegex);
         for (int i = 0; i < lines.size(); i++) {
             String normalized = normalize(lines.get(i));
             if (!containsAny(normalized, labels)) continue;
-            for (int distance = 0; distance <= 6; distance++) {
+
+            for (int distance = 0; distance <= 4; distance++) {
                 int[] indexes = {i + distance, i - distance};
                 for (int index : indexes) {
                     if (index < 0 || index >= lines.size()) continue;
-                    String value = numericValue(lines.get(index));
-                    if (!value.isEmpty()) return value;
+                    Matcher matcher = valuePattern.matcher(lines.get(index));
+                    if (matcher.find()) {
+                        return matcher.group(1).replace(',', '.');
+                    }
                 }
             }
         }
         return "";
     }
 
-    private String numericValue(String text) {
-        Matcher matcher = Pattern.compile("(?<![A-Za-z])([0-9]+(?:[.,][0-9]+)?)")
-            .matcher(text == null ? "" : text);
-        if (!matcher.find()) return "";
-        return matcher.group(1).replace(',', '.');
+    private NperfBrowserCoordinator.Result withoutBaseline(
+            NperfBrowserCoordinator.Result observed) {
+        NperfBrowserCoordinator.Result result =
+            new NperfBrowserCoordinator.Result();
+        if (observed == null) return result;
+
+        result.download = different(observed.download, baselineResult.download);
+        result.upload = different(observed.upload, baselineResult.upload);
+        result.latency = different(observed.latency, baselineResult.latency);
+        result.jitter = different(observed.jitter, baselineResult.jitter);
+        result.server = observed.server;
+        result.operator = observed.operator;
+        result.resultId = different(observed.resultId, baselineResult.resultId);
+        result.resultUrl = different(observed.resultUrl, baselineResult.resultUrl);
+        return result;
+    }
+
+    private String different(String observed, String baseline) {
+        String value = observed == null ? "" : observed.trim();
+        String original = baseline == null ? "" : baseline.trim();
+        if (value.isEmpty() || value.equals(original)) return "";
+        return value;
+    }
+
+    private boolean hasValidThroughput(NperfBrowserCoordinator.Result result) {
+        return result != null && isPositiveMetric(result.download) &&
+            isPositiveMetric(result.upload);
+    }
+
+    private boolean isPositiveMetric(String value) {
+        try {
+            double parsed = Double.parseDouble(value == null ? "" :
+                value.replace(',', '.').trim());
+            return parsed > 0.0d && parsed < 100000.0d;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isNperfResultUrl(String value) {
+        String normalized = normalize(value);
+        return normalized.contains("nperf.com") &&
+            (normalized.contains("/r/") || normalized.contains("/result"));
     }
 
     private void status(String state, String detail) {
@@ -420,19 +764,24 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     }
 
     private void complete() {
-        if (terminalSent || !currentResult.hasThroughput()) return;
+        if (terminalSent || startConfirmedAt == 0L ||
+                !hasValidThroughput(currentResult)) {
+            return;
+        }
         terminalSent = true;
-        status("COMPLETE", "Resultado nPerf completo; regresando a Speedtest NL...");
+        handler.removeCallbacks(watchdog);
+        status("COMPLETE", "Resultado nPerf verificado; regresando a Speedtest NL...");
         NperfBrowserCoordinator.complete(this, token, currentResult);
-        handler.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_BACK), 250L);
+        handler.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_BACK), 350L);
     }
 
     private void fail(String code, String detail) {
         if (terminalSent) return;
         terminalSent = true;
+        handler.removeCallbacks(watchdog);
         Log.w(TAG, code + ": " + detail);
         NperfBrowserCoordinator.fail(this, token, code, detail);
-        handler.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_BACK), 250L);
+        handler.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_BACK), 350L);
     }
 
     private boolean looksLikeNperf(String normalized) {
@@ -448,14 +797,6 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             builder.append(value.trim());
         }
         return builder.toString();
-    }
-
-    private String firstContaining(String source, String... candidates) {
-        for (String candidate : candidates) {
-            String normalized = normalize(candidate);
-            if (source.contains(normalized)) return normalized;
-        }
-        return "";
     }
 
     private boolean containsAny(String source, String... candidates) {
