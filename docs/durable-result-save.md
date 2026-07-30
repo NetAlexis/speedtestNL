@@ -12,3 +12,5 @@ La siguiente repetición solo puede comenzar después de una confirmación expl�
 - no se inicia la siguiente prueba.
 
 La compilación de esta corrección publica un marcador de validación con el resultado de lint, ensamblado y el identificador exacto del artefacto.
+
+Validación final solicitada para la versión 2.3.1.
