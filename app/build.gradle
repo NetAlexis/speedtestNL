@@ -10,8 +10,8 @@ android {
         applicationId "com.netlife.speedtestnl"
         minSdk 24
         targetSdk 34
-        versionCode 13
-        versionName "2.3-durable-drive-save"
+        versionCode 14
+        versionName "2.3.1-durable-drive-save"
     }
 
     buildTypes {
