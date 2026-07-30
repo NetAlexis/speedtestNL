@@ -1221,9 +1221,7 @@ public class MainActivity extends AppCompatActivity {
         handler.post(() -> new AlertDialog.Builder(this)
             .setTitle("nPerf no completó la prueba")
             .setMessage(
-                message + "
-
-" +
+                message + "\n\n" +
                 "Los resultados de Speedtest se conservan. Puede reintentar " +
                 "únicamente nPerf o detener el proceso. No se generará un TXT incompleto.")
             .setPositiveButton("Reintentar nPerf", (dialog, which) -> {
