@@ -7,7 +7,10 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Parses only labelled nPerf result metrics and ignores gauge scales or ads. */
+/**
+ * Parses only the live nPerf metrics. Average/Media rows, gauge scales,
+ * advertisements and server capacity values are never accepted as results.
+ */
 final class NperfResultParser {
 
     private static final Pattern THROUGHPUT_VALUE_UNIT = Pattern.compile(
@@ -26,9 +29,9 @@ final class NperfResultParser {
         NperfBrowserCoordinator.Result result =
             new NperfBrowserCoordinator.Result();
 
-        // The generic parser is retained only for metadata. Its metric regexes
-        // are intentionally not trusted because the nPerf gauge exposes values
-        // such as "1 Gb/s" next to the words Download and Upload.
+        // The generic parser is retained only for metadata. Its numeric output
+        // is not trusted because the nPerf page also publishes server limits,
+        // gauge ticks and average values.
         NperfBrowserCoordinator.Result metadata =
             NperfBrowserCoordinator.parseSharedText(joined);
         result.server = metadata.server;
@@ -37,13 +40,16 @@ final class NperfResultParser {
         result.resultUrl = metadata.resultUrl;
 
         result.download = metricNearLabel(lines,
-            new String[]{"download", "descarga", "bajada"}, true);
+            new String[]{"download", "descarga", "bajada", "debit descendant"}, true);
         result.upload = metricNearLabel(lines,
-            new String[]{"upload", "subida", "carga"}, true);
+            new String[]{"upload", "subida", "carga", "debit montant"}, true);
         result.latency = metricNearLabel(lines,
             new String[]{"latency", "latencia", "ping"}, false);
-        result.jitter = metricNearLabel(lines,
-            new String[]{"jitter"}, false);
+
+        // The public nPerf panel used by this app does not expose jitter as a
+        // primary test metric. The value shown below ping as "Media" is an
+        // average latency and must never be written as jitter.
+        result.jitter = "";
         return result;
     }
 
@@ -70,24 +76,56 @@ final class NperfResultParser {
             String labelLine = normalize(lines.get(i));
             if (!isMetricLabelLine(labelLine, labels)) continue;
 
-            StringBuilder window = new StringBuilder(lines.get(i));
-            String direct = parseWindow(window.toString(), throughput);
-            if (!direct.isEmpty()) return direct;
+            String direct = parseWindow(lines.get(i), throughput);
+            if (!direct.isEmpty() && !isAverageLine(labelLine)) return direct;
 
-            int limit = Math.min(lines.size(), i + 7);
+            boolean skipNextNumeric = false;
+            int limit = Math.min(lines.size(), i + 9);
             for (int j = i + 1; j < limit; j++) {
-                String candidate = normalize(lines.get(j));
+                String raw = lines.get(j) == null ? "" : lines.get(j).trim();
+                String candidate = normalize(raw);
+                if (candidate.isEmpty()) continue;
                 if (j > i + 1 && isAnyMetricLabel(candidate)) break;
-                window.append(' ').append(lines.get(j));
-                String parsed = parseWindow(window.toString(), throughput);
+
+                // nPerf renders an average row as either "Media 152 Mb/s" or
+                // as two accessibility nodes: "Media" then "152 Mb/s".
+                if (isAverageLine(candidate)) {
+                    skipNextNumeric = !containsMetricValue(raw, throughput);
+                    continue;
+                }
+
+                String parsed = parseWindow(raw, throughput);
+                if (skipNextNumeric && !parsed.isEmpty()) {
+                    skipNextNumeric = false;
+                    continue;
+                }
+                skipNextNumeric = false;
                 if (!parsed.isEmpty()) return parsed;
+
+                // Some browsers split the number and unit into adjacent nodes.
+                if (j + 1 < limit) {
+                    String nextRaw = lines.get(j + 1) == null ? "" : lines.get(j + 1).trim();
+                    String next = normalize(nextRaw);
+                    if (!isAverageLine(next) && !isAnyMetricLabel(next)) {
+                        parsed = parseWindow(raw + " " + nextRaw, throughput);
+                        if (!parsed.isEmpty()) return parsed;
+                    }
+                }
             }
         }
         return "";
     }
 
+    private static boolean containsMetricValue(String source, boolean throughput) {
+        return !parseWindow(source, throughput).isEmpty();
+    }
+
+    private static boolean isAverageLine(String line) {
+        return containsAny(line, "media", "average", "avg", "promedio", "moyenne");
+    }
+
     private static boolean isMetricLabelLine(String line, String[] labels) {
-        if (line.isEmpty() || line.length() > 48 || containsAny(line,
+        if (line.isEmpty() || line.length() > 64 || isAverageLine(line) || containsAny(line,
                 "up to", "hasta", "maximum", "maximo", "recommended",
                 "recomendado", "application", "aplicacion")) {
             return false;
@@ -104,12 +142,13 @@ final class NperfResultParser {
 
     private static boolean isAnyMetricLabel(String line) {
         return isMetricLabelLine(line,
-            new String[]{"download", "descarga", "bajada", "upload",
-                "subida", "carga", "latency", "latencia", "ping", "jitter"});
+            new String[]{"download", "descarga", "bajada", "debit descendant",
+                "upload", "subida", "carga", "debit montant",
+                "latency", "latencia", "ping"});
     }
 
     private static String parseWindow(String source, boolean throughput) {
-        if (source == null || source.isEmpty()) return "";
+        if (source == null || source.isEmpty() || isAverageLine(normalize(source))) return "";
         if (throughput) {
             Matcher valueUnit = THROUGHPUT_VALUE_UNIT.matcher(source);
             if (valueUnit.find()) {
@@ -133,7 +172,7 @@ final class NperfResultParser {
             double value = Double.parseDouble(numeric.replace(',', '.'));
             String normalizedUnit = normalize(unit);
             if (normalizedUnit.startsWith("g")) value *= 1000.0d;
-            return value > 0.0d ? decimal(value) : "";
+            return value > 0.0d && value < 100000.0d ? decimal(value) : "";
         } catch (Exception ignored) {
             return "";
         }
