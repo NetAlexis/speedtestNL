@@ -72,7 +72,7 @@ public class NperfBrowserActivity extends AppCompatActivity {
 
             if (NperfBrowserCoordinator.ACTION_RESULT.equals(action)) {
                 Intent result = copyResultExtras(intent);
-                setResult(Activity.RESULT_OK, result);
+                NperfBrowserActivity.this.setResult(Activity.RESULT_OK, result);
                 finish();
                 return;
             }
@@ -83,7 +83,7 @@ public class NperfBrowserActivity extends AppCompatActivity {
                         intent.getStringExtra(NperfBrowserCoordinator.EXTRA_STATE))
                     .putExtra(NperfBrowserCoordinator.EXTRA_DETAIL,
                         intent.getStringExtra(NperfBrowserCoordinator.EXTRA_DETAIL));
-                setResult(Activity.RESULT_CANCELED, result);
+                NperfBrowserActivity.this.setResult(Activity.RESULT_CANCELED, result);
                 finish();
             }
         }
