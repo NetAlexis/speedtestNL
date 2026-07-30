@@ -10,8 +10,8 @@ android {
         applicationId "com.netlife.speedtestnl"
         minSdk 24
         targetSdk 34
-        versionCode 10
-        versionName "2.0-nperf-ocr-anr-fix"
+        versionCode 11
+        versionName "2.1-nperf-download-capacity-fix"
     }
 
     buildTypes {

@@ -93,7 +93,8 @@ final class NperfScreenshotResultParser {
             boolean jitterLabel = normalized.contains("jitter");
 
             MetricValue throughputValue = parseThroughput(line.text);
-            if (throughputValue != null) {
+            if (throughputValue != null &&
+                    !looksLikeServerCapacityLine(line.text)) {
                 double score = visualScore(line.bounds, imageWidth, imageHeight,
                     downloadLabel || uploadLabel, normalized);
                 throughput.add(new Candidate(throughputValue.value, line.text,
@@ -156,7 +157,39 @@ final class NperfScreenshotResultParser {
         return !containsAny(normalized,
             "aplicaciones para", "applications for", "descargue nuestras",
             "download our", "adsl", "vdsl", "test de velocidad para tu conexion",
-            "speed test for your connection", "windows", "android");
+            "speed test for your connection", "windows", "android") &&
+            !looksLikeServerCapacityLine(line.text);
+    }
+
+    /**
+     * nPerf prints the selected server above the result graph. That title may
+     * include the server/plan capacity, for example:
+     * "[EC] Ibarra - 3 Gb/s - Plus Internet de Alta Velocidad".
+     *
+     * OCR correctly reads "3 Gb/s" and converts it to 3000 Mb/s, but that is
+     * not the measured download. A genuine result containing Gb/s is retained
+     * when its line is only the value/unit or carries a metric label.
+     */
+    private static boolean looksLikeServerCapacityLine(String source) {
+        String normalized = normalize(source);
+        if (!containsAny(normalized, "gbit/s", "gb/s", "gbps")) return false;
+
+        // Explicit metric labels make the value eligible even above 1 Gb/s.
+        if (containsAny(normalized,
+                "download", "descarga", "bajada", "debit descendant",
+                "upload", "subida", "carga", "debit montant",
+                "media", "average", "promedio")) {
+            return false;
+        }
+
+        // Remove the numeric capacity and its unit. Remaining alphabetic text
+        // means this is a server, ISP, city or commercial-plan description.
+        String residue = normalized
+            .replaceAll("[0-9]{1,4}(?:[.,][0-9]{1,3})?\\s*(?:gbit/s|gb/s|gbps)", " ")
+            .replaceAll("[^a-z]+", " ")
+            .replaceAll("\\s+", " ")
+            .trim();
+        return residue.length() > 2;
     }
 
     private static double visualScore(Rect bounds, int width, int height,
@@ -239,6 +272,7 @@ final class NperfScreenshotResultParser {
 
     private static boolean looksLikeGaugeScale(Candidate candidate,
             List<Candidate> all) {
+        if (looksLikeServerCapacityLine(candidate.raw)) return true;
         double value = numeric(candidate.value);
         if (value < 900.0d || !normalize(candidate.raw).contains("g")) return false;
         int largerCandidates = 0;
