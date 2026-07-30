@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - agent/**
+      - agent/custom-tab-nperf-automation
   pull_request:
     branches:
       - main
