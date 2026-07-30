@@ -125,6 +125,10 @@ public class MainActivity extends AppCompatActivity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ActivityResultLauncher<Intent> nperfBrowserLauncher;
     private boolean nperfBrowserActive = false;
+    private final AtomicBoolean speedtestResultExtractionStarted =
+        new AtomicBoolean(false);
+    private int speedtestResultExtractionAttempt = 0;
+    private static final int MAX_SPEEDTEST_RESULT_EXTRACTION_ATTEMPTS = 12;
     private NperfAutomation nperfAutomation;
     private int nperfPollingSession = 0;
     private int nperfCompatibilityAttempt = 0;
@@ -391,6 +395,8 @@ public class MainActivity extends AppCompatActivity {
         goPressed = false; pollCount = 0;
         saved.set(false);
         errorDetected.set(false);
+        speedtestResultExtractionStarted.set(false);
+        speedtestResultExtractionAttempt = 0;
 
         nDownload = ""; nUpload = ""; nPing = ""; nJitter = "";
         nServer = ""; nOperator = ""; nResultId = ""; nResultUrl = ""; nDone = false;
@@ -588,6 +594,8 @@ public class MainActivity extends AppCompatActivity {
             goPressed = false; pollCount = 0;
             saved.set(false);
             errorDetected.set(false);
+            speedtestResultExtractionStarted.set(false);
+            speedtestResultExtractionAttempt = 0;
             handler.postDelayed(this::reloadSpeedtestCurrentAttempt, 3000);
         } else {
             showErrorDialog();
@@ -907,38 +915,76 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void extractMetricsThenStartNperf() {
-        if (webView == null) { transitionToNperf(); return; }
-        webView.evaluateJavascript(
-            "(function(){" +
-            "  function g(ss){for(var i=0;i<ss.length;i++){" +
-            "    var els=document.querySelectorAll(ss[i]);" +
-            "    for(var j=0;j<els.length;j++){" +
-            "      var v=els[j].textContent||'';" +
-            "      v=v.trim().replace(/[^0-9.]/g,'');" +
-            "      var n=parseFloat(v);if(!isNaN(n)&&n>0)return ''+n;" +
-            "    }}return '';}" +
-            "  return JSON.stringify({" +
-            "    dl:g(['[data-download-speed]','.download-speed','#download-value'])," +
-            "    ul:g(['[data-upload-speed]','.upload-speed','#upload-value'])," +
-            "    pg:g(['[data-latency]','.ping-speed','#ping-value'])," +
-            "    jt:g(['[data-jitter]','.jitter-speed','#jitter-value'])" +
-            "  });" +
-            "})()",
-            value -> {
-                if (value != null && !value.equals("null")) {
-                    try {
-                        String v = value.replaceAll("^\"|\"$","");
-                        String dl = key(v,"dl"), ul = key(v,"ul");
-                        String pg = key(v,"pg"), jt = key(v,"jt");
-                        if (!dl.isEmpty()) download = dl;
-                        if (!ul.isEmpty()) upload   = ul;
-                        if (!pg.isEmpty()) ping     = pg;
-                        if (!jt.isEmpty()) jitter   = jt;
-                    } catch (Exception e) { e.printStackTrace(); }
-                }
-                transitionToNperf();
+        captureSpeedtestResultMetrics();
+    }
+
+    private void captureSpeedtestResultMetrics() {
+        if (!"speedtest".equals(phase) ||
+                !speedtestResultExtractionStarted.get()) return;
+        if (webView == null) {
+            failSpeedtestMetricExtraction();
+            return;
+        }
+
+        speedtestResultExtractionAttempt++;
+        webView.evaluateJavascript(SpeedtestResultExtractor.javascript(), value -> {
+            SpeedtestResultExtractor.Metrics metrics =
+                SpeedtestResultExtractor.parse(value);
+            if (SpeedtestResultExtractor.positive(metrics.download)) {
+                download = metrics.download;
             }
-        );
+            if (SpeedtestResultExtractor.positive(metrics.upload)) {
+                upload = metrics.upload;
+            }
+            if (SpeedtestResultExtractor.positive(metrics.ping)) {
+                ping = metrics.ping;
+            }
+            if (SpeedtestResultExtractor.positive(metrics.jitter)) {
+                jitter = metrics.jitter;
+            }
+
+            showPanel();
+            if (hasStoredSpeedtestResult()) {
+                setStatus("Speedtest verificado. Abriendo nPerf...");
+                SpeedtestService.update(this,
+                    "Speedtest verificado - prueba " + currentRun,
+                    "Prueba " + currentRun + " de " + totalRuns);
+                handler.postDelayed(this::transitionToNperf, 600L);
+                return;
+            }
+
+            if (speedtestResultExtractionAttempt <
+                    MAX_SPEEDTEST_RESULT_EXTRACTION_ATTEMPTS) {
+                setStatus("Speedtest finalizó. Leyendo descarga, subida y ping (" +
+                    speedtestResultExtractionAttempt + "/" +
+                    MAX_SPEEDTEST_RESULT_EXTRACTION_ATTEMPTS + ")...");
+                handler.postDelayed(this::captureSpeedtestResultMetrics, 1500L);
+            } else {
+                failSpeedtestMetricExtraction();
+            }
+        });
+    }
+
+    private void failSpeedtestMetricExtraction() {
+        if (!speedtestResultExtractionStarted.compareAndSet(true, false)) return;
+        saved.set(false);
+        setStatus("Speedtest terminó, pero no se pudieron validar sus métricas. Reintentando...");
+        SpeedtestService.update(this,
+            "No se pudieron leer métricas Speedtest - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+        handler.postDelayed(this::retryRun, 1200L);
+    }
+
+    private boolean hasStoredSpeedtestResult() {
+        return SpeedtestResultExtractor.positive(download) &&
+            SpeedtestResultExtractor.positive(upload) &&
+            SpeedtestResultExtractor.positive(ping);
+    }
+
+    private boolean hasStoredNperfResult() {
+        return NperfResultParser.positive(nDownload) &&
+            NperfResultParser.positive(nUpload) &&
+            NperfResultParser.positive(nPing);
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -1024,6 +1070,17 @@ public class MainActivity extends AppCompatActivity {
     // ══════════════════════════════════════════════════════════════════════
     private void saveTxt() {
         if (!"nperf".equals(phase) || !nSaved.get()) return;
+        if (!hasStoredSpeedtestResult()) {
+            setStatus("No se guardó: faltan métricas verificadas de Speedtest.");
+            showErrorDialog();
+            return;
+        }
+        if (!hasStoredNperfResult()) {
+            nSaved.set(false);
+            showNperfBrowserDecision("INCOMPLETE_RESULT",
+                "nPerf no devolvió descarga, subida y latencia válidas");
+            return;
+        }
         if (!finalSaveStarted.compareAndSet(false, true)) return;
         setStatus("Guardando resultado en Google Drive...");
 
@@ -1178,10 +1235,10 @@ public class MainActivity extends AppCompatActivity {
             nResultUrl = valueOrEmpty(data.getStringExtra(
                 NperfBrowserCoordinator.EXTRA_RESULT_URL));
 
-            if (nDownload.isEmpty() || nUpload.isEmpty()) {
+            if (!hasStoredNperfResult()) {
                 showNperfBrowserDecision(
                     "INCOMPLETE_RESULT",
-                    "nPerf devolvió un resultado sin descarga o subida");
+                    "nPerf devolvió un resultado sin descarga, subida o latencia válida");
                 return;
             }
 
@@ -1725,6 +1782,8 @@ public class MainActivity extends AppCompatActivity {
         pollCount = 0;
         saved.set(false);
         errorDetected.set(false);
+        speedtestResultExtractionStarted.set(false);
+        speedtestResultExtractionAttempt = 0;
         setSpeedtestUserAgent();
         clearWebViewSession(false);
         webView.loadUrl(SPEEDTEST_URL);
@@ -1734,7 +1793,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void completeSpeedtestFromUrl(String url) {
         if (url != null) {
-            Matcher matcher = Pattern.compile("result/([\\w-]+)").matcher(url);
+            Matcher matcher = Pattern.compile("result/([\w-]+)").matcher(url);
             if (matcher.find()) resultId = matcher.group(1);
             resultUrl = url;
         }
@@ -1742,15 +1801,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void completeSpeedtest() {
-        if (!"speedtest".equals(phase) || !saved.compareAndSet(false, true)) return;
-        handler.post(() -> {
-            showPanel();
-            if (!isInBackground && webView != null) {
-                extractMetricsThenStartNperf();
-            } else {
-                transitionToNperf();
-            }
-        });
+        if (!"speedtest".equals(phase) ||
+                !speedtestResultExtractionStarted.compareAndSet(false, true)) {
+            return;
+        }
+        saved.set(true);
+        speedtestResultExtractionAttempt = 0;
+        setStatus("Speedtest finalizado. Validando descarga, subida, ping y jitter...");
+        handler.post(this::extractMetricsThenStartNperf);
     }
 
     private void transitionToNperf() {

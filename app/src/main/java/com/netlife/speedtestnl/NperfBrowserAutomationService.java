@@ -383,19 +383,21 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             NperfBrowserCoordinator.Result observed,
             long now) {
         NperfBrowserCoordinator.Result sanitized = withoutBaseline(observed);
-        if (hasValidThroughput(sanitized)) currentResult.merge(sanitized);
+        mergeValidatedMetrics(currentResult, sanitized);
 
         long sinceConfirmed = now - startConfirmedAt;
         boolean throughput = hasValidThroughput(currentResult);
+        boolean latencyReady = NperfResultParser.positive(currentResult.latency);
 
-        if (!throughput) {
+        if (!throughput || !latencyReady) {
             if (sinceConfirmed >= START_DATA_TIMEOUT_MS) {
                 fail("START_DATA_TIMEOUT",
-                    "nPerf confirmó el inicio, pero no produjo descarga y subida");
+                    "nPerf confirmó el inicio, pero no produjo descarga, subida y latencia válidas");
                 return;
             }
-            status("RUNNING",
-                "nPerf iniciado; esperando datos reales de descarga y subida...");
+            status("RUNNING", throughput
+                ? "nPerf produjo descarga y subida; esperando latencia final..."
+                : "nPerf iniciado; esperando datos reales de descarga y subida...");
             return;
         }
 
@@ -410,8 +412,8 @@ public class NperfBrowserAutomationService extends AccessibilityService {
 
         stage = Stage.RESULT_CANDIDATE;
         status("RESULT_CANDIDATE", "nPerf: ↓ " + currentResult.download +
-            " Mb/s · ↑ " + currentResult.upload +
-            " Mb/s; verificando finalización...");
+            " Mb/s · ↑ " + currentResult.upload + " Mb/s · Latencia " +
+            currentResult.latency + " ms; verificando finalización...");
 
         boolean explicitComplete = containsAny(normalized,
             "probar de nuevo", "reiniciar test", "restart test",
@@ -640,9 +642,6 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         if (!description.isEmpty() && !description.equals(text)) {
             output.add(description);
         }
-        String viewId = node.getViewIdResourceName();
-        if (viewId != null && !viewId.isEmpty()) output.add(viewId);
-
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child == null) continue;
@@ -656,65 +655,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
 
     private NperfBrowserCoordinator.Result extractStrictResult(
             List<String> lines, String joined) {
-        NperfBrowserCoordinator.Result result =
-            NperfBrowserCoordinator.parseSharedText(joined);
-
-        // Only accept adjacent values when the value itself carries a unit.
-        // This prevents numbers from advertising cards, server lists or the
-        // speedometer scale from being interpreted as test results.
-        result.download = prefer(result.download,
-            metricNearLabelWithUnit(lines,
-                new String[]{"download", "descarga", "bajada"},
-                "(?:mbps|mb/s|mbit/s|gbps|gb/s|gbit/s)"));
-        result.upload = prefer(result.upload,
-            metricNearLabelWithUnit(lines,
-                new String[]{"upload", "subida", "carga"},
-                "(?:mbps|mb/s|mbit/s|gbps|gb/s|gbit/s)"));
-        result.latency = prefer(result.latency,
-            metricNearLabelWithUnit(lines,
-                new String[]{"latency", "latencia", "ping"}, "ms"));
-        result.jitter = prefer(result.jitter,
-            metricNearLabelWithUnit(lines,
-                new String[]{"jitter"}, "ms"));
-
-        for (String line : lines) {
-            String normalized = normalize(line);
-            if (result.resultUrl.isEmpty() && normalized.contains("nperf.com") &&
-                    (normalized.contains("/r/") || normalized.contains("/result"))) {
-                Matcher matcher = Pattern.compile(
-                    "(?i)(https?://[^\\s]+)").matcher(line);
-                if (matcher.find()) result.resultUrl = matcher.group(1);
-            }
-            if (result.resultId.isEmpty()) {
-                Matcher matcher = Pattern.compile(
-                    "(?i)(?:result(?:ado)?\\s*id|id de resultado)\\D{0,8}" +
-                    "([A-Za-z0-9_-]{5,})").matcher(line);
-                if (matcher.find()) result.resultId = matcher.group(1);
-            }
-        }
-        return result;
-    }
-
-    private String metricNearLabelWithUnit(List<String> lines,
-            String[] labels, String unitRegex) {
-        Pattern valuePattern = Pattern.compile(
-            "(?i)([0-9]+(?:[.,][0-9]+)?)\\s*" + unitRegex);
-        for (int i = 0; i < lines.size(); i++) {
-            String normalized = normalize(lines.get(i));
-            if (!containsAny(normalized, labels)) continue;
-
-            for (int distance = 0; distance <= 4; distance++) {
-                int[] indexes = {i + distance, i - distance};
-                for (int index : indexes) {
-                    if (index < 0 || index >= lines.size()) continue;
-                    Matcher matcher = valuePattern.matcher(lines.get(index));
-                    if (matcher.find()) {
-                        return matcher.group(1).replace(',', '.');
-                    }
-                }
-            }
-        }
-        return "";
+        return NperfResultParser.parse(lines, joined);
     }
 
     private NperfBrowserCoordinator.Result withoutBaseline(
@@ -741,19 +682,30 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         return value;
     }
 
+    private void mergeValidatedMetrics(NperfBrowserCoordinator.Result target,
+            NperfBrowserCoordinator.Result source) {
+        if (target == null || source == null) return;
+        if (NperfResultParser.positive(source.download)) target.download = source.download;
+        if (NperfResultParser.positive(source.upload)) target.upload = source.upload;
+        if (NperfResultParser.positive(source.latency)) target.latency = source.latency;
+        if (NperfResultParser.positive(source.jitter)) target.jitter = source.jitter;
+        if (!source.server.isEmpty()) target.server = source.server;
+        if (!source.operator.isEmpty()) target.operator = source.operator;
+        if (!source.resultId.isEmpty()) target.resultId = source.resultId;
+        if (!source.resultUrl.isEmpty()) target.resultUrl = source.resultUrl;
+    }
+
     private boolean hasValidThroughput(NperfBrowserCoordinator.Result result) {
-        return result != null && isPositiveMetric(result.download) &&
-            isPositiveMetric(result.upload);
+        return result != null && NperfResultParser.positive(result.download) &&
+            NperfResultParser.positive(result.upload);
+    }
+
+    private boolean hasCompleteNperfResult(NperfBrowserCoordinator.Result result) {
+        return NperfResultParser.hasRequiredMetrics(result);
     }
 
     private boolean isPositiveMetric(String value) {
-        try {
-            double parsed = Double.parseDouble(value == null ? "" :
-                value.replace(',', '.').trim());
-            return parsed > 0.0d && parsed < 100000.0d;
-        } catch (Exception ignored) {
-            return false;
-        }
+        return NperfResultParser.positive(value);
     }
 
     private boolean isNperfResultUrl(String value) {
@@ -768,7 +720,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
 
     private void complete() {
         if (terminalSent || startConfirmedAt == 0L ||
-                !hasValidThroughput(currentResult)) {
+                !hasCompleteNperfResult(currentResult)) {
             return;
         }
         terminalSent = true;
