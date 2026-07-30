@@ -25,6 +25,7 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.browser.customtabs.CustomTabsClient;
 import androidx.browser.customtabs.CustomTabsIntent;
+import androidx.core.content.ContextCompat;
 
 import java.util.Arrays;
 import java.util.List;
@@ -267,11 +268,12 @@ public class NperfBrowserActivity extends AppCompatActivity {
         filter.addAction(NperfBrowserCoordinator.ACTION_STATUS);
         filter.addAction(NperfBrowserCoordinator.ACTION_RESULT);
         filter.addAction(NperfBrowserCoordinator.ACTION_ERROR);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(receiver, filter);
-        }
+        ContextCompat.registerReceiver(
+            this,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        );
         receiverRegistered = true;
     }
 
