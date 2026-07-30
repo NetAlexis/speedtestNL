@@ -11,7 +11,7 @@ on:
       - agent/stabilize-speedtest-nperf
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -20,22 +20,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: agent/custom-tab-nperf-automation
-          fetch-depth: 0
-
-      - name: Apply guarded compile corrections
-        run: |
-          python3 scripts/fix_custom_tab_dialog.py
-          git diff --check
-          if ! git diff --quiet -- app/src/main/java/com/netlife/speedtestnl/MainActivity.java app/src/main/java/com/netlife/speedtestnl/NperfBrowserActivity.java; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add app/src/main/java/com/netlife/speedtestnl/MainActivity.java \
-                    app/src/main/java/com/netlife/speedtestnl/NperfBrowserActivity.java
-            git commit -m "Fix Custom Tab activity result handling"
-            git push origin HEAD:agent/custom-tab-nperf-automation
-          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
