@@ -309,7 +309,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         }
 
         if (startVisible) {
-            AccessibilityNodeInfo startNode = findTextNode(root, false,
+            AccessibilityNodeInfo startNode = findTextNode(root, true,
                 new String[]{"iniciar test", "iniciar prueba", "start test",
                     "lancer le test"}, 0);
             if (startNode != null) {
@@ -443,7 +443,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     }
 
     private boolean hasStartControl(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo node = findTextNode(root, false,
+        AccessibilityNodeInfo node = findTextNode(root, true,
             new String[]{"iniciar test", "iniciar prueba", "start test",
                 "lancer le test"}, 0);
         if (node == null) return false;
