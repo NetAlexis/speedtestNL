@@ -10,8 +10,8 @@ android {
         applicationId "com.netlife.speedtestnl"
         minSdk 24
         targetSdk 34
-        versionCode 5
-        versionName "1.5-custom-tab"
+        versionCode 6
+        versionName "1.6-custom-tab-verified"
     }
 
     buildTypes {
