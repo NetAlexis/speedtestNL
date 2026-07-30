@@ -31,6 +31,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.activity.result.ActivityResult;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
@@ -120,6 +123,8 @@ public class MainActivity extends AppCompatActivity {
 
     private PowerManager.WakeLock wakeLock;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private ActivityResultLauncher<Intent> nperfBrowserLauncher;
+    private boolean nperfBrowserActive = false;
     private NperfAutomation nperfAutomation;
     private int nperfPollingSession = 0;
     private int nperfCompatibilityAttempt = 0;
@@ -146,6 +151,10 @@ public class MainActivity extends AppCompatActivity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setContentView(R.layout.activity_main);
 
+        nperfBrowserLauncher = registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(),
+            this::handleNperfBrowserResult);
+
         tvStatus      = findViewById(R.id.tvStatus);
         tvResultId    = findViewById(R.id.tvResultId);
         tvDownload    = findViewById(R.id.tvDownload);
@@ -160,7 +169,6 @@ public class MainActivity extends AppCompatActivity {
         acquireWakeLock();
         requestPerms();
         setupWebView();
-        setupNperfAutomation();
         startForegroundService();
 
         setStatus("Cargando configuracion...");
@@ -392,6 +400,8 @@ public class MainActivity extends AppCompatActivity {
         nperfPollingStarted.set(false);
 
         nperfRetry = 0;
+        nperfBrowserActive = false;
+        NperfBrowserCoordinator.cancel(this, null);
         nperfCompatibilityAttempt = 0;
         nperfEngineDiagnostic = "";
         nperfTransitionStarted.set(false);
@@ -1116,6 +1126,127 @@ public class MainActivity extends AppCompatActivity {
 
 
 
+    // ══════════════════════════════════════════════════════════════════════
+    // NPERF EN CUSTOM TAB — navegador completo + AccessibilityService
+    // ══════════════════════════════════════════════════════════════════════
+    private void startNperfBrowser() {
+        if (!"nperf".equals(phase) || nSaved.get() || finalSaveStarted.get()) return;
+        if (nperfBrowserActive) return;
+        if (!isWifiConnected()) {
+            showNoWifiDialog(this::startNperfBrowser);
+            return;
+        }
+        if (!isConnected()) {
+            showNoInternetDialog(this::startNperfBrowser);
+            return;
+        }
+
+        nperfBrowserActive = true;
+        nErrorDetected.set(false);
+        setStatus("Speedtest OK. Abriendo nPerf en navegador completo...");
+        SpeedtestService.update(this,
+            "Abriendo nPerf en navegador - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+
+        Intent intent = new Intent(this, NperfBrowserActivity.class)
+            .putExtra(NperfBrowserActivity.EXTRA_RUN, currentRun)
+            .putExtra(NperfBrowserActivity.EXTRA_TOTAL, totalRuns);
+        nperfBrowserLauncher.launch(intent);
+    }
+
+    private void handleNperfBrowserResult(ActivityResult activityResult) {
+        nperfBrowserActive = false;
+        if (!"nperf".equals(phase) || nSaved.get() || finalSaveStarted.get()) return;
+
+        Intent data = activityResult == null ? null : activityResult.getData();
+        if (activityResult != null && activityResult.getResultCode() == RESULT_OK &&
+                data != null) {
+            nDownload = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_DOWNLOAD));
+            nUpload = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_UPLOAD));
+            nPing = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_LATENCY));
+            nJitter = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_JITTER));
+            nServer = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_SERVER));
+            nOperator = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_OPERATOR));
+            nResultId = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_RESULT_ID));
+            nResultUrl = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_RESULT_URL));
+
+            if (nDownload.isEmpty() || nUpload.isEmpty()) {
+                showNperfBrowserDecision(
+                    "INCOMPLETE_RESULT",
+                    "nPerf devolvió un resultado sin descarga o subida");
+                return;
+            }
+
+            if (nSaved.compareAndSet(false, true)) {
+                nDone = true;
+                progressBar.setVisibility(View.GONE);
+                showPanel();
+                setStatus("nPerf completo. Generando TXT combinado...");
+                SpeedtestService.update(this,
+                    "nPerf completo - guardando prueba " + currentRun,
+                    "Prueba " + currentRun + " de " + totalRuns);
+                handler.postDelayed(this::saveTxt, 700L);
+            }
+            return;
+        }
+
+        String code = data == null ? "NPERF_BROWSER_CANCELLED" :
+            valueOrEmpty(data.getStringExtra(NperfBrowserCoordinator.EXTRA_STATE));
+        String detail = data == null ? "nPerf terminó sin devolver resultados" :
+            valueOrEmpty(data.getStringExtra(NperfBrowserCoordinator.EXTRA_DETAIL));
+        if (detail.isEmpty()) detail = "nPerf no devolvió un resultado completo";
+        showNperfBrowserDecision(code, detail);
+    }
+
+    private void showNperfBrowserDecision(String code, String detail) {
+        String safeCode = valueOrEmpty(code);
+        String safeDetail = valueOrEmpty(detail);
+        if (safeCode.isEmpty()) safeCode = "NPERF_BROWSER_ERROR";
+        if (safeDetail.isEmpty()) safeDetail = "nPerf no completó la prueba";
+
+        setStatus("Error nPerf: " + safeDetail);
+        SpeedtestService.update(this,
+            "Error nPerf " + safeCode + " - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+
+        final String message = safeDetail;
+        handler.post(() -> new AlertDialog.Builder(this)
+            .setTitle("nPerf no completó la prueba")
+            .setMessage(
+                message + "
+
+" +
+                "Los resultados de Speedtest se conservan. Puede reintentar " +
+                "únicamente nPerf o detener el proceso. No se generará un TXT incompleto.")
+            .setPositiveButton("Reintentar nPerf", (dialog, which) -> {
+                nErrorDetected.set(false);
+                nperfBrowserActive = false;
+                setStatus("Reintentando únicamente nPerf...");
+                handler.postDelayed(this::startNperfBrowser, 700L);
+            })
+            .setNegativeButton("Detener", (dialog, which) -> {
+                NperfBrowserCoordinator.cancel(this, null);
+                isRunning = false;
+                releaseWakeLock();
+                SpeedtestService.stop(this);
+                setStatus("Proceso detenido: nPerf no completó la prueba " + currentRun);
+            })
+            .setCancelable(false)
+            .show());
+    }
+
+    private String valueOrEmpty(String value) {
+        return value == null ? "" : value.trim();
+    }
+
     private void setupNperfAutomation() {
         nperfAutomation = new NperfAutomation(webView, handler,
             new NperfAutomation.Listener() {
@@ -1633,13 +1764,13 @@ public class MainActivity extends AppCompatActivity {
         SpeedtestService.update(this,
             "Iniciando nperf - prueba " + currentRun,
             "Prueba " + currentRun + " de " + totalRuns);
-        handler.postDelayed(this::startNperf, 2000);
+        handler.postDelayed(this::startNperfBrowser, 1200);
     }
 
     private void resumeCurrentPhaseAfterConnection() {
         if ("nperf".equals(phase)) {
             nErrorDetected.set(false);
-            handler.postDelayed(this::startNperf, 1000);
+            handler.postDelayed(this::startNperfBrowser, 1000);
         } else {
             errorDetected.set(false);
             handler.postDelayed(this::reloadSpeedtestCurrentAttempt, 1000);
@@ -1655,7 +1786,7 @@ public class MainActivity extends AppCompatActivity {
             SpeedtestService.update(this,
                 "Reintentando nperf - prueba " + currentRun,
                 "Prueba " + currentRun + " de " + totalRuns);
-            handler.postDelayed(this::startNperf, 3000);
+            handler.postDelayed(this::startNperfBrowser, 1500);
         } else {
             showErrorDialog();
         }

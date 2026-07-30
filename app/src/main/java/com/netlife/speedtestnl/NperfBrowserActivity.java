@@ -10,6 +10,8 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
@@ -44,6 +46,7 @@ public class NperfBrowserActivity extends AppCompatActivity {
         "org.mozilla.firefox"
     );
 
+    private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView statusView;
     private ProgressBar progressBar;
     private String token = "";
@@ -99,7 +102,20 @@ public class NperfBrowserActivity extends AppCompatActivity {
         super.onResume();
         if (isAccessibilityServiceEnabled()) {
             setupDialogVisible = false;
-            if (!browserLaunched) beginAndLaunch();
+            if (!browserLaunched) {
+                beginAndLaunch();
+            } else if (NperfBrowserCoordinator.isActiveToken(this, token)) {
+                // onResume after launch means the user/browser closed the tab.
+                // Wait briefly so a result broadcast can win the race.
+                handler.postDelayed(() -> {
+                    if (!isFinishing() &&
+                            NperfBrowserCoordinator.isActiveToken(this, token)) {
+                        NperfBrowserCoordinator.fail(this, token,
+                            "TAB_CLOSED",
+                            "La pestaña de nPerf se cerró antes de completar la prueba");
+                    }
+                }, 1400L);
+            }
         } else if (!setupDialogVisible) {
             showAccessibilitySetup();
         }
