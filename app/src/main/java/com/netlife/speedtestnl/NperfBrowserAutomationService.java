@@ -3,15 +3,27 @@ package com.netlife.speedtestnl;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
+import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.Rect;
+import android.hardware.HardwareBuffer;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.Display;
 import android.view.accessibility.AccessibilityNodeInfo;
+
+import androidx.annotation.NonNull;
+
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.Text;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import java.text.Normalizer;
 import java.util.ArrayList;
@@ -36,13 +48,16 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     private static final long PAGE_READY_DELAY_MS = 2500L;
     private static final long START_RETRY_INTERVAL_MS = 9000L;
     private static final long START_CONFIRM_TIMEOUT_MS = 35 * 1000L;
-    private static final long START_DATA_TIMEOUT_MS = 90 * 1000L;
+    private static final long START_DATA_TIMEOUT_MS = 150 * 1000L;
+    private static final long OCR_START_AFTER_MS = 30 * 1000L;
+    private static final long OCR_RETRY_INTERVAL_MS = 5000L;
     private static final long MIN_COMPLETE_AFTER_START_MS = 28 * 1000L;
     private static final long STABLE_RESULT_COMPLETE_MS = 12 * 1000L;
     private static final long STABLE_RESULT_FALLBACK_MIN_MS = 45 * 1000L;
     private static final long ACTION_DEBOUNCE_MS = 1400L;
     private static final long WATCHDOG_INTERVAL_MS = 1800L;
     private static final int MAX_START_ATTEMPTS = 3;
+    private static final int MAX_OCR_ATTEMPTS = 12;
 
     private enum Stage {
         WAITING_PAGE,
@@ -71,6 +86,14 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     private boolean locationHandled = false;
     private boolean terminalSent = false;
     private boolean inspecting = false;
+    private boolean ocrInProgress = false;
+    private boolean lastOcrRequestedAtCompleteScreen = false;
+
+    private int ocrAttempts = 0;
+    private int ocrStableReads = 0;
+    private long lastOcrAttemptAt = 0L;
+    private String lastOcrSignature = "";
+    private TextRecognizer textRecognizer;
 
     private Stage stage = Stage.WAITING_PAGE;
     private String lastResultSignature = "";
@@ -99,7 +122,21 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             info.flags |= AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;
             setServiceInfo(info);
         }
+        if (textRecognizer == null) {
+            textRecognizer = TextRecognition.getClient(
+                TextRecognizerOptions.DEFAULT_OPTIONS);
+        }
         Log.i(TAG, "Accessibility controller connected");
+    }
+
+    @Override
+    public void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
+        if (textRecognizer != null) {
+            textRecognizer.close();
+            textRecognizer = null;
+        }
+        super.onDestroy();
     }
 
     @Override
@@ -161,6 +198,12 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             locationHandled = false;
             terminalSent = false;
             inspecting = false;
+            ocrInProgress = false;
+            lastOcrRequestedAtCompleteScreen = false;
+            ocrAttempts = 0;
+            ocrStableReads = 0;
+            lastOcrAttemptAt = 0L;
+            lastOcrSignature = "";
             stage = Stage.WAITING_PAGE;
             lastResultSignature = "";
             baselineResult = new NperfBrowserCoordinator.Result();
@@ -182,6 +225,11 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         firstPageSeenAt = 0L;
         terminalSent = false;
         inspecting = false;
+        ocrInProgress = false;
+        ocrAttempts = 0;
+        ocrStableReads = 0;
+        lastOcrAttemptAt = 0L;
+        lastOcrSignature = "";
     }
 
     private boolean isExpectedBrowser(String packageName) {
@@ -388,16 +436,37 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         long sinceConfirmed = now - startConfirmedAt;
         boolean throughput = hasValidThroughput(currentResult);
         boolean latencyReady = NperfResultParser.positive(currentResult.latency);
+        boolean explicitComplete = containsAny(normalized,
+            "probar de nuevo", "reiniciar test", "restart test", "reiniciar",
+            "compartir resultado", "share result", "compartir",
+            "resultado completo", "test finalizado", "prueba finalizada");
 
         if (!throughput || !latencyReady) {
-            if (sinceConfirmed >= START_DATA_TIMEOUT_MS) {
-                fail("START_DATA_TIMEOUT",
-                    "nPerf confirmó el inicio, pero no produjo descarga, subida y latencia válidas");
+            boolean shouldUseVisualResult = explicitComplete ||
+                sinceConfirmed >= OCR_START_AFTER_MS;
+            if (shouldUseVisualResult) {
+                requestVisualResultOcr(explicitComplete, now);
+            }
+
+            if (sinceConfirmed >= START_DATA_TIMEOUT_MS &&
+                    !ocrInProgress && ocrAttempts >= MAX_OCR_ATTEMPTS) {
+                String reason = Build.VERSION.SDK_INT < Build.VERSION_CODES.R
+                    ? "El navegador no expuso las métricas y Android no permite capturar la pantalla en esta versión"
+                    : "nPerf terminó visualmente, pero no se pudieron verificar descarga, subida y latencia después de " +
+                      MAX_OCR_ATTEMPTS + " lecturas";
+                fail("VISUAL_RESULT_NOT_READ", reason);
                 return;
             }
-            status("RUNNING", throughput
-                ? "nPerf produjo descarga y subida; esperando latencia final..."
-                : "nPerf iniciado; esperando datos reales de descarga y subida...");
+
+            if (ocrInProgress) {
+                status("OCR_READING", "nPerf finalizó. Leyendo visualmente descarga, subida y latencia...");
+            } else if (shouldUseVisualResult) {
+                status("OCR_WAIT", "Esperando una lectura visual válida del resultado nPerf...");
+            } else {
+                status("RUNNING", throughput
+                    ? "nPerf produjo descarga y subida; esperando latencia final..."
+                    : "nPerf iniciado; esperando datos reales de descarga y subida...");
+            }
             return;
         }
 
@@ -415,10 +484,6 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             " Mb/s · ↑ " + currentResult.upload + " Mb/s · Latencia " +
             currentResult.latency + " ms; verificando finalización...");
 
-        boolean explicitComplete = containsAny(normalized,
-            "probar de nuevo", "reiniciar test", "restart test",
-            "compartir resultado", "share result", "resultado completo",
-            "test finalizado", "prueba finalizada");
         boolean resultIdentity = !currentResult.resultId.isEmpty() ||
             isNperfResultUrl(currentResult.resultUrl);
         boolean minimumDuration = sinceConfirmed >= MIN_COMPLETE_AFTER_START_MS;
@@ -430,6 +495,133 @@ public class NperfBrowserAutomationService extends AccessibilityService {
                 ((explicitComplete && stableLongEnough) ||
                  (resultIdentity && stableLongEnough) ||
                  (fallbackDuration && stableLongEnough))) {
+            complete();
+        }
+    }
+
+
+    private void requestVisualResultOcr(boolean explicitComplete, long now) {
+        if (terminalSent || ocrInProgress || ocrAttempts >= MAX_OCR_ATTEMPTS) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
+        if (lastOcrAttemptAt > 0L && now - lastOcrAttemptAt < OCR_RETRY_INTERVAL_MS) return;
+
+        ocrInProgress = true;
+        ocrAttempts++;
+        lastOcrAttemptAt = now;
+        lastOcrRequestedAtCompleteScreen = explicitComplete;
+        status("OCR_CAPTURE", "Leyendo panel final nPerf (" + ocrAttempts + "/" +
+            MAX_OCR_ATTEMPTS + ")...");
+
+        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(),
+            new TakeScreenshotCallback() {
+                @Override
+                public void onSuccess(@NonNull ScreenshotResult screenshotResult) {
+                    processScreenshotResult(screenshotResult,
+                        lastOcrRequestedAtCompleteScreen);
+                }
+
+                @Override
+                public void onFailure(int errorCode) {
+                    ocrInProgress = false;
+                    Log.w(TAG, "nPerf screenshot failed: " + errorCode);
+                    status("OCR_CAPTURE_FAILED",
+                        "No se pudo capturar el panel nPerf; se reintentará...");
+                }
+            });
+    }
+
+    private void processScreenshotResult(ScreenshotResult screenshotResult,
+            boolean explicitComplete) {
+        HardwareBuffer buffer = screenshotResult.getHardwareBuffer();
+        Bitmap hardwareBitmap = null;
+        Bitmap softwareBitmap = null;
+        try {
+            hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer,
+                screenshotResult.getColorSpace());
+            if (hardwareBitmap != null) {
+                softwareBitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false);
+            }
+        } catch (Exception error) {
+            Log.e(TAG, "Unable to convert nPerf screenshot", error);
+        } finally {
+            buffer.close();
+        }
+
+        if (softwareBitmap == null) {
+            ocrInProgress = false;
+            status("OCR_BITMAP_FAILED", "No se pudo preparar la captura nPerf...");
+            return;
+        }
+
+        if (textRecognizer == null) {
+            textRecognizer = TextRecognition.getClient(
+                TextRecognizerOptions.DEFAULT_OPTIONS);
+        }
+
+        final Bitmap bitmap = softwareBitmap;
+        final int width = bitmap.getWidth();
+        final int height = bitmap.getHeight();
+        InputImage image = InputImage.fromBitmap(bitmap, 0);
+        textRecognizer.process(image)
+            .addOnSuccessListener(visionText ->
+                handleVisualTextResult(visionText, width, height, explicitComplete))
+            .addOnFailureListener(error -> {
+                Log.e(TAG, "ML Kit could not read nPerf result", error);
+                status("OCR_FAILED", "No se pudo leer el panel nPerf; reintentando...");
+            })
+            .addOnCompleteListener(task -> {
+                bitmap.recycle();
+                ocrInProgress = false;
+            });
+    }
+
+    private void handleVisualTextResult(Text visionText, int width, int height,
+            boolean explicitComplete) {
+        if (terminalSent || !syncSession()) return;
+
+        List<NperfScreenshotResultParser.Line> lines = new ArrayList<>();
+        for (Text.TextBlock block : visionText.getTextBlocks()) {
+            for (Text.Line line : block.getLines()) {
+                Rect bounds = line.getBoundingBox();
+                if (bounds != null && !line.getText().trim().isEmpty()) {
+                    lines.add(new NperfScreenshotResultParser.Line(
+                        line.getText(), bounds));
+                }
+            }
+        }
+
+        NperfBrowserCoordinator.Result visual =
+            NperfScreenshotResultParser.parse(lines, width, height);
+        if (!NperfResultParser.hasRequiredMetrics(visual)) {
+            ocrStableReads = 0;
+            lastOcrSignature = "";
+            status("OCR_NO_METRICS", "La captura no mostró aún descarga, subida y latencia verificables...");
+            Log.i(TAG, "OCR did not produce required nPerf metrics. Text=" +
+                visionText.getText().replace('\n', ' '));
+            return;
+        }
+
+        String signature = visual.download + "|" + visual.upload + "|" +
+            visual.latency + "|" + visual.jitter;
+        if (signature.equals(lastOcrSignature)) {
+            ocrStableReads++;
+        } else {
+            lastOcrSignature = signature;
+            ocrStableReads = 1;
+        }
+
+        boolean visualComplete = explicitComplete || containsAny(
+            normalize(visionText.getText()), "compartir", "share", "reiniciar",
+            "restart", "probar de nuevo");
+        status("OCR_RESULT", "Lectura visual nPerf: ↓ " + visual.download +
+            " Mb/s · ↑ " + visual.upload + " Mb/s · Latencia " +
+            visual.latency + " ms" + (ocrStableReads >= 2 ? " ✓" : ""));
+
+        if (visualComplete || ocrStableReads >= 2) {
+            mergeValidatedMetrics(currentResult, visual);
+            resultStableAt = SystemClock.elapsedRealtime() -
+                STABLE_RESULT_COMPLETE_MS;
+            stage = Stage.RESULT_CANDIDATE;
             complete();
         }
     }
