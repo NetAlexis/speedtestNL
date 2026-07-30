@@ -5,15 +5,13 @@ on:
     branches:
       - main
       - agent/custom-tab-nperf-automation
-    paths-ignore:
-      - validation/android-build.json
   pull_request:
     branches:
       - main
       - agent/stabilize-speedtest-nperf
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -21,8 +19,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -43,17 +39,12 @@ jobs:
         run: chmod +x gradlew
 
       - name: Run lint
-        id: lint
-        continue-on-error: true
         run: ./gradlew lintRelease --stacktrace
 
       - name: Build release APK
-        id: assemble
-        continue-on-error: true
         run: ./gradlew assembleRelease --stacktrace
 
       - name: Upload APK
-        if: steps.assemble.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: SpeedtestNL-CustomTab-release
@@ -69,33 +60,3 @@ jobs:
           path: app/build/reports/lint-results-release.html
           if-no-files-found: ignore
           retention-days: 14
-
-      - name: Record build marker
-        if: always() && github.event_name == 'push'
-        env:
-          LINT_OUTCOME: ${{ steps.lint.outcome }}
-          ASSEMBLE_OUTCOME: ${{ steps.assemble.outcome }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_NUMBER: ${{ github.run_number }}
-          HEAD_SHA: ${{ github.sha }}
-        run: |
-          mkdir -p validation
-          cat > validation/android-build.json <<EOF
-          {
-            "run_id": "${RUN_ID}",
-            "run_number": "${RUN_NUMBER}",
-            "head_sha": "${HEAD_SHA}",
-            "lint": "${LINT_OUTCOME}",
-            "assemble": "${ASSEMBLE_OUTCOME}",
-            "artifact": "SpeedtestNL-CustomTab-release"
-          }
-          EOF
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add validation/android-build.json
-          git commit -m "Record Android build ${RUN_NUMBER}" || true
-          git push origin HEAD:agent/custom-tab-nperf-automation
-
-      - name: Enforce validation result
-        if: steps.lint.outcome != 'success' || steps.assemble.outcome != 'success'
-        run: exit 1
