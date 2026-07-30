@@ -1,8 +1,0 @@
-{
-  "run_id": "30586044831",
-  "run_number": "2",
-  "head_sha": "cfb7e105595fa94565475dcebdb0d1595db0d304",
-  "lint": "success",
-  "assemble": "success",
-  "artifact": "SpeedtestNL-CustomTab-2.3.1-release"
-}
