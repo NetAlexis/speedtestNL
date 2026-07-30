@@ -13,6 +13,17 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
 
+    <queries>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <category android:name="android.intent.category.BROWSABLE"/>
+            <data android:scheme="https"/>
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@drawable/ic_launcher"
@@ -33,6 +44,26 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".NperfBrowserActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:launchMode="singleTop"
+            android:label="@string/nperf_browser_activity_title"/>
+
+        <service
+            android:name=".NperfBrowserAutomationService"
+            android:exported="true"
+            android:label="@string/nperf_accessibility_service_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/nperf_accessibility_service"/>
+        </service>
 
         <service
             android:name=".SpeedtestService"
