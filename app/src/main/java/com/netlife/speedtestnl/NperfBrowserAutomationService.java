@@ -524,14 +524,17 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     private Rect bestTapBounds(AccessibilityNodeInfo node) {
         Rect best = new Rect();
         AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(node);
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
         try {
             for (int depth = 0; current != null && depth < 7; depth++) {
                 Rect candidate = new Rect();
                 current.getBoundsInScreen(candidate);
-                if (isUsableBounds(candidate) &&
-                        (best.isEmpty() || candidate.width() * candidate.height() >
-                            best.width() * best.height())) {
+                boolean plausibleControl = isUsableBounds(candidate) &&
+                    candidate.width() <= metrics.widthPixels * 0.90f &&
+                    candidate.height() <= metrics.heightPixels * 0.30f;
+                if (plausibleControl) {
                     best.set(candidate);
+                    break;
                 }
                 AccessibilityNodeInfo parent = current.getParent();
                 current.recycle();
