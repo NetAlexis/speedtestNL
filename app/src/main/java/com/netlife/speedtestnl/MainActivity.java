@@ -945,7 +945,8 @@ public class MainActivity extends AppCompatActivity {
 
             showPanel();
             if (hasStoredSpeedtestResult()) {
-                setStatus("Speedtest verificado. Abriendo nPerf...");
+                setStatus("Speedtest verificado con Result ID " + resultId +
+                    ". Abriendo nPerf...");
                 SpeedtestService.update(this,
                     "Speedtest verificado - prueba " + currentRun,
                     "Prueba " + currentRun + " de " + totalRuns);
@@ -955,7 +956,7 @@ public class MainActivity extends AppCompatActivity {
 
             if (speedtestResultExtractionAttempt <
                     MAX_SPEEDTEST_RESULT_EXTRACTION_ATTEMPTS) {
-                setStatus("Speedtest finalizó. Leyendo descarga, subida y ping (" +
+                setStatus("Speedtest finalizó. Validando métricas, Result ID y URL (" +
                     speedtestResultExtractionAttempt + "/" +
                     MAX_SPEEDTEST_RESULT_EXTRACTION_ATTEMPTS + ")...");
                 handler.postDelayed(this::captureSpeedtestResultMetrics, 1500L);
@@ -968,9 +969,9 @@ public class MainActivity extends AppCompatActivity {
     private void failSpeedtestMetricExtraction() {
         if (!speedtestResultExtractionStarted.compareAndSet(true, false)) return;
         saved.set(false);
-        setStatus("Speedtest terminó, pero no se pudieron validar sus métricas. Reintentando...");
+        setStatus("Speedtest terminó, pero faltan métricas, Result ID o URL. Reintentando...");
         SpeedtestService.update(this,
-            "No se pudieron leer métricas Speedtest - prueba " + currentRun,
+            "Speedtest incompleto: métricas/Result ID/URL - prueba " + currentRun,
             "Prueba " + currentRun + " de " + totalRuns);
         handler.postDelayed(this::retryRun, 1200L);
     }
@@ -978,7 +979,27 @@ public class MainActivity extends AppCompatActivity {
     private boolean hasStoredSpeedtestResult() {
         return SpeedtestResultExtractor.positive(download) &&
             SpeedtestResultExtractor.positive(upload) &&
-            SpeedtestResultExtractor.positive(ping);
+            SpeedtestResultExtractor.positive(ping) &&
+            hasValidSpeedtestIdentity();
+    }
+
+    private boolean hasValidSpeedtestIdentity() {
+        String id = resultId == null ? "" : resultId.trim();
+        String url = resultUrl == null ? "" : resultUrl.trim();
+        if (!id.matches("[A-Za-z0-9_-]{5,}")) return false;
+        try {
+            Uri parsed = Uri.parse(url);
+            String host = parsed.getHost();
+            String path = parsed.getPath();
+            boolean validHost = host != null &&
+                (host.equalsIgnoreCase("speedtest.net") ||
+                 host.equalsIgnoreCase("www.speedtest.net") ||
+                 host.toLowerCase(Locale.ROOT).endsWith(".speedtest.net"));
+            return validHost && path != null &&
+                path.matches(".*/result/" + Pattern.quote(id) + "/?");
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private boolean hasStoredNperfResult() {
@@ -1071,7 +1092,7 @@ public class MainActivity extends AppCompatActivity {
     private void saveTxt() {
         if (!"nperf".equals(phase) || !nSaved.get()) return;
         if (!hasStoredSpeedtestResult()) {
-            setStatus("No se guardó: faltan métricas verificadas de Speedtest.");
+            setStatus("No se guardó: faltan métricas, Result ID o URL verificados de Speedtest.");
             showErrorDialog();
             return;
         }
@@ -1102,8 +1123,8 @@ public class MainActivity extends AppCompatActivity {
             "  Subida       : " + f(upload,  "Mbps") + "\n" +
             "  Ping         : " + f(ping,    "ms")   + "\n" +
             "  Jitter       : " + f(jitter,  "ms")   + "\n" +
-            "  Result ID    : " + (resultId.isEmpty()  ? "N/A" : resultId)  + "\n" +
-            "  URL          : " + (resultUrl.isEmpty() ? "N/A" : resultUrl) + "\n\n" +
+            "  Result ID    : " + resultId + "\n" +
+            "  URL          : " + resultUrl + "\n\n" +
             "-- NPERF.COM --\n" +
             "  Descarga     : " + f(nDownload,"Mb/s") + "\n" +
             "  Subida       : " + f(nUpload,  "Mb/s") + "\n" +
@@ -1793,9 +1814,11 @@ public class MainActivity extends AppCompatActivity {
 
     private void completeSpeedtestFromUrl(String url) {
         if (url != null) {
-            Matcher matcher = Pattern.compile("result/([\\w-]+)").matcher(url);
-            if (matcher.find()) resultId = matcher.group(1);
-            resultUrl = url;
+            Matcher matcher = Pattern.compile("/result/([\\w-]+)(?:/|$)").matcher(url);
+            if (matcher.find()) {
+                resultId = matcher.group(1);
+                resultUrl = url;
+            }
         }
         completeSpeedtest();
     }
