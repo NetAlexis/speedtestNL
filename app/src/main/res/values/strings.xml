@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Speedtest NL</string>
+    <string name="nperf_accessibility_service_name">Automatización nPerf de Speedtest NL</string>
+    <string name="nperf_accessibility_description">Automatiza una secuencia fija dentro del navegador para aceptar el consentimiento web de nPerf, iniciar la prueba y devolver sus resultados a Speedtest NL. Solo actúa mientras Speedtest NL mantiene una sesión nPerf activa.</string>
+    <string name="nperf_browser_activity_title">nPerf en navegador</string>
 </resources>

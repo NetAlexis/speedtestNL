@@ -8,6 +8,7 @@ import android.app.Service;
 import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
+
 import androidx.core.app.NotificationCompat;
 
 public class SpeedtestService extends Service {
@@ -33,9 +34,9 @@ public class SpeedtestService extends Service {
             return START_NOT_STICKY;
         }
 
-        String status   = intent != null ? intent.getStringExtra(EXTRA_STATUS)   : "Ejecutando...";
+        String status = intent != null ? intent.getStringExtra(EXTRA_STATUS) : "Ejecutando...";
         String progress = intent != null ? intent.getStringExtra(EXTRA_PROGRESS) : "";
-        if (status == null)   status   = "Ejecutando...";
+        if (status == null) status = "Ejecutando...";
         if (progress == null) progress = "";
 
         startForeground(NOTIF_ID, buildNotification(status, progress));
@@ -43,27 +44,28 @@ public class SpeedtestService extends Service {
     }
 
     public static void update(android.content.Context ctx, String status, String progress) {
-        Intent i = new Intent(ctx, SpeedtestService.class);
-        i.setAction(ACTION_UPDATE);
-        i.putExtra(EXTRA_STATUS,   status);
-        i.putExtra(EXTRA_PROGRESS, progress);
+        Intent intent = new Intent(ctx, SpeedtestService.class);
+        intent.setAction(ACTION_UPDATE);
+        intent.putExtra(EXTRA_STATUS, status);
+        intent.putExtra(EXTRA_PROGRESS, progress);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            ctx.startForegroundService(i);
+            ctx.startForegroundService(intent);
         } else {
-            ctx.startService(i);
+            ctx.startService(intent);
         }
     }
 
     public static void stop(android.content.Context ctx) {
-        Intent i = new Intent(ctx, SpeedtestService.class);
-        i.setAction(ACTION_STOP);
-        ctx.startService(i);
+        Intent intent = new Intent(ctx, SpeedtestService.class);
+        intent.setAction(ACTION_STOP);
+        ctx.startService(intent);
     }
 
     private Notification buildNotification(String status, String progress) {
-        Intent openApp = new Intent(this, MainActivity.class);
-        openApp.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent pi = PendingIntent.getActivity(this, 0, openApp,
+        Intent openApp = new Intent(this, RestartableMainActivity.class);
+        openApp.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP |
+            Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, openApp,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
@@ -71,7 +73,7 @@ public class SpeedtestService extends Service {
             .setContentText(status)
             .setSubText(progress)
             .setSmallIcon(android.R.drawable.ic_menu_upload)
-            .setContentIntent(pi)
+            .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build();
@@ -79,14 +81,15 @@ public class SpeedtestService extends Service {
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel ch = new NotificationChannel(
-                CHANNEL_ID, "Speedtest NL",
-                NotificationManager.IMPORTANCE_LOW);
-            ch.setDescription("Pruebas de velocidad en progreso");
-            getSystemService(NotificationManager.class).createNotificationChannel(ch);
+            NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID, "Speedtest NL", NotificationManager.IMPORTANCE_LOW);
+            channel.setDescription("Pruebas de velocidad en progreso");
+            getSystemService(NotificationManager.class).createNotificationChannel(channel);
         }
     }
 
     @Override
-    public IBinder onBind(Intent intent) { return null; }
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
 }
