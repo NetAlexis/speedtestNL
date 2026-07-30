@@ -18,10 +18,7 @@ import java.util.Locale;
 
 /**
  * Persists a completed combined result before attempting its Drive upload.
- *
- * A failed or ambiguous network request never discards the TXT. The pending
- * file remains in app-private storage and can be uploaded again without
- * repeating either speed test.
+ * A failed or ambiguous request never discards the TXT.
  */
 final class ResultSaveManager {
 
@@ -40,10 +37,11 @@ final class ResultSaveManager {
     static void persistAndUpload(Context context, String endpoint,
             String fileName, String content, Callback callback) {
         Context appContext = context.getApplicationContext();
+        String normalizedContent = normalizeNperfOutput(content);
         new Thread(() -> {
             File pendingFile;
             try {
-                pendingFile = persistAtomically(appContext, fileName, content);
+                pendingFile = persistAtomically(appContext, fileName, normalizedContent);
             } catch (Exception error) {
                 callback.onFailure("No se pudo crear la copia local: " +
                     safeMessage(error), null);
@@ -66,10 +64,8 @@ final class ResultSaveManager {
                     callback.onStatus("Subiendo resultado a Google Drive...");
                 }
 
-                last = upload(endpoint, fileName, content);
+                last = upload(endpoint, fileName, normalizedContent);
                 if (last.success) {
-                    // The local file is only a pending queue item. Remove it
-                    // after the remote endpoint explicitly confirms success.
                     if (pendingFile.exists() && !pendingFile.delete()) {
                         pendingFile.deleteOnExit();
                     }
@@ -81,6 +77,27 @@ final class ResultSaveManager {
             String detail = last == null ? "Error de subida no especificado" : last.detail;
             callback.onFailure(detail, pendingFile);
         }, "SpeedtestNL-ResultSave").start();
+    }
+
+    /**
+     * nPerf's row labelled Media is average latency, not jitter. MainActivity
+     * keeps a fixed TXT template, so normalize only the nPerf section before
+     * local persistence and remote upload.
+     */
+    private static String normalizeNperfOutput(String content) {
+        String source = content == null ? "" : content;
+        int nperf = source.indexOf("-- NPERF.COM --");
+        if (nperf < 0) return source;
+        int end = source.indexOf("==================================================", nperf);
+        if (end < 0) end = source.length();
+
+        String prefix = source.substring(0, nperf);
+        String section = source.substring(nperf, end);
+        String suffix = source.substring(end);
+        section = section.replaceAll(
+            "(?m)^(\\s*Jitter\\s*:)\\s*(?:N/A|-?(?:\\s*ms)?)\\s*$",
+            "$1");
+        return prefix + section + suffix;
     }
 
     private static File persistAtomically(Context context, String fileName,
