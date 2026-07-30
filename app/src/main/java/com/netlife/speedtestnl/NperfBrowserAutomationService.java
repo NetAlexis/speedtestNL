@@ -49,7 +49,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
 
     private static final long SESSION_TIMEOUT_MS = 7 * 60 * 1000L;
     private static final long PAGE_READY_DELAY_MS = 2500L;
-    private static final long START_RETRY_INTERVAL_MS = 9000L;
+    private static final long START_RETRY_INTERVAL_MS = 8000L;
     private static final long START_CONFIRM_TIMEOUT_MS = 90 * 1000L;
     private static final long START_DATA_TIMEOUT_MS = 150 * 1000L;
     private static final long OCR_START_AFTER_MS = 18 * 1000L;
@@ -62,7 +62,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     private static final long WATCHDOG_INTERVAL_MS = 1800L;
     private static final long MIN_INSPECTION_INTERVAL_MS = 900L;
     private static final int MAX_ACCESSIBILITY_TEXT_LINES = 500;
-    private static final int MAX_START_ATTEMPTS = 1;
+    private static final int MAX_START_ATTEMPTS = 3;
     private static final int MAX_OCR_ATTEMPTS = 10;
 
     private enum Stage {
@@ -429,7 +429,8 @@ public class NperfBrowserAutomationService extends AccessibilityService {
 
         boolean confirmedByDisappearance = startMissingObservations >= 2 &&
             now - lastStartAttemptAt >= 1500L;
-        boolean confirmedByLiveData = newThroughput &&
+        boolean newLatency = NperfResultParser.positive(sanitized.latency);
+        boolean confirmedByLiveData = (newThroughput || newLatency) &&
             now - lastStartAttemptAt >= 3000L;
 
         if (confirmedByDisappearance || confirmedByLiveData) {
@@ -741,15 +742,21 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         long now = SystemClock.elapsedRealtime();
         if (now - lastActionAt < ACTION_DEBOUNCE_MS) return false;
 
-        if (performClickOnNodeOrParent(node)) {
+        // Chrome may report ACTION_CLICK as accepted even when the nPerf canvas
+        // does not receive it. Use that semantic click only for the first try;
+        // subsequent bounded retries are real Android gestures on the exact
+        // visible text/control bounds.
+        if (startAttempts == 0 && performClickOnNodeOrParent(node)) {
             markStartRequested("ACCESSIBILITY_CLICK");
             return true;
         }
 
         Rect bounds = bestTapBounds(node);
         if (!isUsableBounds(bounds)) return false;
-        return dispatchTap(bounds.centerX(), bounds.centerY(),
-            "START_TEXT_BOUNDS", true);
+        String source = startAttempts == 0
+            ? "START_TEXT_BOUNDS"
+            : "START_RETRY_TEXT_BOUNDS_" + (startAttempts + 1);
+        return dispatchTap(bounds.centerX(), bounds.centerY(), source, true);
     }
 
     private void dispatchFallbackStartTap() {
@@ -758,7 +765,9 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         if (now - lastActionAt < ACTION_DEBOUNCE_MS) return;
 
         DisplayMetrics metrics = getResources().getDisplayMetrics();
-        float[] verticalFractions = {0.39f, 0.43f, 0.47f};
+        // In Chrome Custom Tabs the nPerf gauge is normally in the upper third.
+        // These positions are used only when no accessible start node exists.
+        float[] verticalFractions = {0.27f, 0.32f, 0.38f};
         int index = Math.min(startAttempts, verticalFractions.length - 1);
         float x = metrics.widthPixels * 0.50f;
         float y = metrics.heightPixels * verticalFractions[index];
@@ -879,7 +888,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         lastStartAttemptAt = now;
         startMissingObservations = 0;
         stage = Stage.START_REQUESTED;
-        status("START_REQUESTED", "Activación " + startAttempts + "/" +
+        status("START_REQUESTED", "Activación controlada " + startAttempts + "/" +
             MAX_START_ATTEMPTS + " enviada; verificando inicio real...");
         Log.i(TAG, "nPerf start request " + startAttempts + " by " + source);
     }
