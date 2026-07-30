@@ -24,4 +24,30 @@ for old, new in replacements.items():
         browser = browser.replace(old, new, 1)
     elif new not in browser:
         raise RuntimeError(f"Missing browser result marker: {old}")
+
+import_marker = "import androidx.browser.customtabs.CustomTabsIntent;\n"
+compat_import = import_marker + "import androidx.core.content.ContextCompat;\n"
+if compat_import not in browser:
+    if import_marker not in browser:
+        raise RuntimeError("CustomTabsIntent import marker not found")
+    browser = browser.replace(import_marker, compat_import, 1)
+
+old_receiver = '''        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(receiver, filter);
+        }
+'''
+new_receiver = '''        ContextCompat.registerReceiver(
+            this,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        );
+'''
+if old_receiver in browser:
+    browser = browser.replace(old_receiver, new_receiver, 1)
+elif new_receiver not in browser:
+    raise RuntimeError("Dynamic receiver registration marker not found")
+
 browser_path.write_text(browser, encoding="utf-8")
