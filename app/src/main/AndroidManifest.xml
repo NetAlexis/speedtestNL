@@ -35,7 +35,7 @@
         android:usesCleartextTraffic="false">
 
         <activity
-            android:name=".MainActivity"
+            android:name=".RestartableMainActivity"
             android:exported="true"
             android:screenOrientation="portrait"
             android:launchMode="singleTop">
@@ -44,6 +44,12 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:launchMode="singleTop"/>
 
         <activity
             android:name=".NperfBrowserActivity"
