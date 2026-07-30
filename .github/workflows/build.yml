@@ -25,6 +25,7 @@ jobs:
       - name: Apply guarded nPerf OCR and ANR correction
         run: |
           python scripts/fix_nperf_ocr_anr.py
+          git checkout -- .github/workflows/build.yml
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
