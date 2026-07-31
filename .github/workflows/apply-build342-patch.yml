@@ -6,9 +6,11 @@ on:
       - agent/build342-from-build340
     paths:
       - .ci/build342.patch.gz.b64
+      - .ci/apply-build342.trigger
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   apply:
@@ -39,3 +41,17 @@ jobs:
             .github/workflows/build.yml
           git commit -m "Apply final fixes on exact build 340 base"
           git push origin HEAD:agent/build342-from-build340
+
+  report:
+    if: always()
+    needs: apply
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report patch result
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Build 342 patch ${{ needs.apply.result }} - run $GITHUB_RUN_ID" \
+            --body "Patch application result: ${{ needs.apply.result }}. Source: $GITHUB_SHA. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
