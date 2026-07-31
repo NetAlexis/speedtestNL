@@ -88,6 +88,17 @@ final class NperfScreenshotResultParser {
         List<Candidate> throughput = new ArrayList<>();
         List<Candidate> latency = new ArrayList<>();
         List<Marker> markers = new ArrayList<>();
+        List<Rect> averageMarkers = new ArrayList<>();
+
+        // OCR frequently splits “Media” and its number into separate nodes.
+        // Record every average label first so its detached numeric value can
+        // never be selected later as download, upload or latency.
+        for (Line line : lines) {
+            if (line == null || line.bounds.isEmpty()) continue;
+            if (isAverageLine(normalize(line.text))) {
+                averageMarkers.add(new Rect(line.bounds));
+            }
+        }
 
         for (Line line : lines) {
             if (!isUsefulLine(line, imageWidth, imageHeight)) continue;
@@ -96,6 +107,12 @@ final class NperfScreenshotResultParser {
 
             Role role = roleFor(line.text);
             if (role != null) markers.add(new Marker(role, line.bounds));
+            boolean explicitPrimaryRole = role == Role.DOWNLOAD ||
+                role == Role.UPLOAD || role == Role.LATENCY;
+            if (!explicitPrimaryRole && isDetachedAverageValue(line.bounds,
+                    averageMarkers, imageWidth, imageHeight)) {
+                continue;
+            }
 
             MetricValue throughputValue = parseThroughput(line.text);
             if (throughputValue != null && !looksLikeServerCapacityLine(line.text)) {
@@ -188,6 +205,28 @@ final class NperfScreenshotResultParser {
     private static boolean isAverageLine(String normalized) {
         return containsAny(normalized,
             "media", "average", "avg", "promedio", "moyenne");
+    }
+
+    private static boolean isDetachedAverageValue(Rect candidate,
+            List<Rect> averageMarkers, int width, int height) {
+        if (candidate == null || candidate.isEmpty() ||
+                averageMarkers == null || averageMarkers.isEmpty()) {
+            return false;
+        }
+        for (Rect average : averageMarkers) {
+            if (average == null || average.isEmpty()) continue;
+            float dx = Math.abs(candidate.exactCenterX() - average.exactCenterX());
+            float dy = Math.abs(candidate.exactCenterY() - average.exactCenterY());
+            float sameRowTolerance = Math.max(average.height(), candidate.height()) * 0.9f + 8f;
+            boolean sameRow = dy <= sameRowTolerance &&
+                candidate.left >= average.left - width * 0.08f &&
+                candidate.left <= average.right + width * 0.62f;
+            boolean stacked = candidate.exactCenterY() >= average.exactCenterY() &&
+                candidate.top <= average.bottom + height * 0.055f &&
+                dx <= width * 0.38f;
+            if (sameRow || stacked) return true;
+        }
+        return false;
     }
 
     private static boolean isUsefulLine(Line line, int width, int height) {

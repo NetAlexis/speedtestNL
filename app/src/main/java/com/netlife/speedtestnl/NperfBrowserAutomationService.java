@@ -47,11 +47,11 @@ public class NperfBrowserAutomationService extends AccessibilityService {
 
     private static final String TAG = "SpeedtestNL-nPerfTab";
 
-    private static final long SESSION_TIMEOUT_MS = 7 * 60 * 1000L;
+    private static final long SESSION_TIMEOUT_MS = 135 * 1000L;
     private static final long PAGE_READY_DELAY_MS = 2500L;
     private static final long START_RETRY_INTERVAL_MS = 8000L;
-    private static final long START_CONFIRM_TIMEOUT_MS = 90 * 1000L;
-    private static final long START_DATA_TIMEOUT_MS = 150 * 1000L;
+    private static final long START_CONFIRM_TIMEOUT_MS = 45 * 1000L;
+    private static final long START_DATA_TIMEOUT_MS = 120 * 1000L;
     private static final long OCR_START_AFTER_MS = 18 * 1000L;
     private static final long OCR_START_WHILE_UNCONFIRMED_MS = 12 * 1000L;
     private static final long OCR_RETRY_INTERVAL_MS = 7000L;
