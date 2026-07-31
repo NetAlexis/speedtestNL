@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -40,3 +40,16 @@ jobs:
           path: SpeedtestNL-build-341.apk
           retention-days: 14
           if-no-files-found: error
+
+      - name: Publish build 341 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view build-341 >/dev/null 2>&1; then
+            gh release upload build-341 SpeedtestNL-build-341.apk --clobber
+          else
+            gh release create build-341 SpeedtestNL-build-341.apk \
+              --target "$GITHUB_SHA" \
+              --title "SpeedtestNL build 341" \
+              --notes "Build 341: corrección de lectura de descarga/subida en nPerf, eliminación de jitter de nPerf y mejoras de reintento/restablecimiento."
+          fi
