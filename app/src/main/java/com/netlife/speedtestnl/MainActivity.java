@@ -107,7 +107,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int PERM_REQ = 100;
     private static final int PERM_REQ_NOTIF = 101;
     private static final int MAX_POLL = 120;
-    private static final int MAX_NPERF_POLL = 80;
+    private static final int MAX_NPERF_POLL = 45;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -292,6 +292,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         isRunning = true;
+        startBannerWatcher();
         currentRun++;
         currentRetry = 0;
         nRetryCount = 0;
@@ -414,6 +415,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void retryRun() {
+        saved.set(true);
+        handler.removeCallbacksAndMessages(null);
+        watcherRunning = false;
         if (currentRetry < maxRetries) {
             currentRetry++;
             setStatus("Reintentando prueba " + currentRun + " (" + currentRetry + "/" + maxRetries + ")...");
@@ -426,9 +430,10 @@ public class MainActivity extends AppCompatActivity {
             pageLoaded = false;
             goPressed = false;
             pollCount = 0;
-            saved.set(false);
             errorDetected.set(false);
             handler.postDelayed(() -> {
+                saved.set(false);
+                startBannerWatcher();
                 prepareWebView(false);
                 webView.loadUrl("https://www.speedtest.net/en");
                 progressBar.setVisibility(View.VISIBLE);
@@ -456,10 +461,14 @@ public class MainActivity extends AppCompatActivity {
 
     private void retryNperfOrShow(String reason) {
         if (nSaved.get()) return;
-        if (nRetryCount < maxRetries) {
+        nSaved.set(true);
+        handler.removeCallbacksAndMessages(null);
+        watcherRunning = false;
+        int nperfAutoRetries = Math.min(maxRetries, 1);
+        if (nRetryCount < nperfAutoRetries) {
             nRetryCount++;
             nErrorDetected.set(false);
-            setStatus("Reintentando nperf (" + nRetryCount + "/" + maxRetries + ")...");
+            setStatus("Reintentando nperf (" + nRetryCount + "/" + nperfAutoRetries + ")...");
             handler.postDelayed(this::startNperf, 3000);
         } else {
             showNperfErrorDialog(reason);
@@ -740,6 +749,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        startBannerWatcher();
         nGoPressed = false;
         nPageLoaded = false;
         nPollCount = 0;
@@ -842,7 +852,12 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 if (!nSaved.get() && nPollCount >= MAX_NPERF_POLL) {
-                    retryNperfOrShow("nPerf superó el tiempo máximo de 4 minutos.");
+                    if (validMetric(nDownload) && validMetric(nUpload) &&
+                            nSaved.compareAndSet(false, true)) {
+                        extractNperfMetrics();
+                    } else {
+                        retryNperfOrShow("nPerf superó el tiempo máximo de 2 minutos 15 segundos.");
+                    }
                     return;
                 }
                 if (!nSaved.get()) handler.postDelayed(this, 3000);
