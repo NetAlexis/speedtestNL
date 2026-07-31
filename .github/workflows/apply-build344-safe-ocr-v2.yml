@@ -1,0 +1,97 @@
+name: Apply Build 344 Safe OCR V2
+
+on:
+  push:
+    branches:
+      - agent/build342-from-build340
+    paths:
+      - .ci/build344-safe-ocr-v2.trigger
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Build 344 branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/build344-build340-safe-ocr
+          fetch-depth: 0
+
+      - name: Apply verified replacements
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              text = path.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"Expected one match in {path}, found {count}: {old[:100]!r}")
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          gradle = Path("app/build.gradle")
+          replace_once(gradle,
+              '        versionCode 16\n        versionName "2.5-build340-final-fixes"',
+              '        versionCode 18\n        versionName "2.7-build340-safe-ocr"')
+
+          service = Path("app/src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java")
+          replace_once(service,
+              '    private static final long SESSION_TIMEOUT_MS = 135 * 1000L;',
+              '    private static final long SESSION_TIMEOUT_MS = 7 * 60 * 1000L;')
+          replace_once(service,
+              '    private static final long START_CONFIRM_TIMEOUT_MS = 45 * 1000L;',
+              '    private static final long START_CONFIRM_TIMEOUT_MS = 90 * 1000L;')
+          replace_once(service,
+              '    private static final long START_DATA_TIMEOUT_MS = 120 * 1000L;',
+              '    private static final long START_DATA_TIMEOUT_MS = 150 * 1000L;')
+          replace_once(service,
+              '    private static final int MAX_OCR_ATTEMPTS = 10;',
+              '    private static final int MAX_OCR_ATTEMPTS = 40;')
+          replace_once(service,
+              '''        public void run() {
+            if (!syncSession()) return;
+            scheduleInspection(0L);
+            if (syncSession()) handler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+        }''',
+              '''        public void run() {
+            if (!syncSession()) return;
+            long now = SystemClock.elapsedRealtime();
+            if (firstStartRequestAt > 0L &&
+                    now - firstStartRequestAt >= STABLE_RESULT_FALLBACK_MIN_MS) {
+                requestVisualResultOcr(false, now);
+            }
+            scheduleInspection(0L);
+            if (syncSession()) handler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+        }''')
+          replace_once(service,
+              '        if (!looksLikeNperf(normalized)) return;',
+              '''        // Require the nPerf identity only before the controlled start.
+        // Afterwards continue OCR even if Chrome exposes no page text.
+        if (!looksLikeNperf(normalized) && firstStartRequestAt == 0L) return;''')
+          PY
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/build.gradle app/src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java
+          git commit -m "Restore Build 340 tolerance and add independent nPerf OCR"
+          git push origin HEAD:agent/build344-build340-safe-ocr
+
+  report:
+    runs-on: ubuntu-latest
+    needs: apply
+    if: always()
+    steps:
+      - name: Report result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.apply.result }}
+        run: |
+          gh issue create --repo "${{ github.repository }}" \
+            --title "Build 344 safe OCR v2 ${RESULT} - run ${{ github.run_id }}" \
+            --body "Verified Build 344 replacement result: ${RESULT}. Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
