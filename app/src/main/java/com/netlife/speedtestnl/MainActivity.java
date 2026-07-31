@@ -31,6 +31,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.activity.result.ActivityResult;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
@@ -55,7 +58,7 @@ public class MainActivity extends AppCompatActivity {
     private TextView     tvStatus, tvResultId, tvDownload, tvUpload;
     private TextView     tvPing, tvJitter, tvCounter;
     private ProgressBar  progressBar;
-    private LinearLayout layoutResults;
+    private LinearLayout layoutResults, layoutJitter;
 
     // ── Estado prueba ─────────────────────────────────────────────────────
     private String  resultId   = "";
@@ -120,6 +123,17 @@ public class MainActivity extends AppCompatActivity {
 
     private PowerManager.WakeLock wakeLock;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private ActivityResultLauncher<Intent> nperfBrowserLauncher;
+    private boolean nperfBrowserActive = false;
+    private String pendingSaveFileName = "";
+    private String pendingSaveContent = "";
+    private boolean driveSaveDecisionVisible = false;
+    private boolean nperfDecisionVisible = false;
+    private boolean completionDialogVisible = false;
+    private final AtomicBoolean speedtestResultExtractionStarted =
+        new AtomicBoolean(false);
+    private int speedtestResultExtractionAttempt = 0;
+    private static final int MAX_SPEEDTEST_RESULT_EXTRACTION_ATTEMPTS = 12;
     private NperfAutomation nperfAutomation;
     private int nperfPollingSession = 0;
     private int nperfCompatibilityAttempt = 0;
@@ -146,6 +160,10 @@ public class MainActivity extends AppCompatActivity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setContentView(R.layout.activity_main);
 
+        nperfBrowserLauncher = registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(),
+            this::handleNperfBrowserResult);
+
         tvStatus      = findViewById(R.id.tvStatus);
         tvResultId    = findViewById(R.id.tvResultId);
         tvDownload    = findViewById(R.id.tvDownload);
@@ -155,12 +173,12 @@ public class MainActivity extends AppCompatActivity {
         tvCounter     = findViewById(R.id.tvCounter);
         progressBar   = findViewById(R.id.progressBar);
         layoutResults = findViewById(R.id.layoutResults);
+        layoutJitter  = findViewById(R.id.layoutJitter);
         webView       = findViewById(R.id.webView);
 
         acquireWakeLock();
         requestPerms();
         setupWebView();
-        setupNperfAutomation();
         startForegroundService();
 
         setStatus("Cargando configuracion...");
@@ -383,6 +401,8 @@ public class MainActivity extends AppCompatActivity {
         goPressed = false; pollCount = 0;
         saved.set(false);
         errorDetected.set(false);
+        speedtestResultExtractionStarted.set(false);
+        speedtestResultExtractionAttempt = 0;
 
         nDownload = ""; nUpload = ""; nPing = ""; nJitter = "";
         nServer = ""; nOperator = ""; nResultId = ""; nResultUrl = ""; nDone = false;
@@ -392,10 +412,15 @@ public class MainActivity extends AppCompatActivity {
         nperfPollingStarted.set(false);
 
         nperfRetry = 0;
+        nperfBrowserActive = false;
+        NperfBrowserCoordinator.cancel(this, null);
         nperfCompatibilityAttempt = 0;
         nperfEngineDiagnostic = "";
         nperfTransitionStarted.set(false);
         finalSaveStarted.set(false);
+        pendingSaveFileName = "";
+        pendingSaveContent = "";
+        driveSaveDecisionVisible = false;
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -578,6 +603,8 @@ public class MainActivity extends AppCompatActivity {
             goPressed = false; pollCount = 0;
             saved.set(false);
             errorDetected.set(false);
+            speedtestResultExtractionStarted.set(false);
+            speedtestResultExtractionAttempt = 0;
             handler.postDelayed(this::reloadSpeedtestCurrentAttempt, 3000);
         } else {
             showErrorDialog();
@@ -597,7 +624,7 @@ public class MainActivity extends AppCompatActivity {
                     "Se produjo un error al ejecutar la prueba " +
                     currentRun + " de " + totalRuns + ".\n\n" +
                     "¿Desea volver a intentarlo?")
-                .setPositiveButton("Aceptar", (d, w) -> {
+                .setPositiveButton("Intentar de nuevo", (d, w) -> {
                     // Reiniciar reintentos y volver a la misma prueba
                     currentRetry = 0;
                     resetState();
@@ -605,17 +632,7 @@ public class MainActivity extends AppCompatActivity {
                     setStatus("Reintentando prueba " + (currentRun + 1) + "...");
                     handler.postDelayed(this::startRun, 3000);
                 })
-                .setNegativeButton("Cancelar", (d, w) -> {
-                    // Terminar todo — no ejecutar más pruebas
-                    isRunning = false;
-                    releaseWakeLock();
-                    SpeedtestService.stop(this);
-                    setStatus("Pruebas canceladas en prueba " + currentRun);
-                    Toast.makeText(this,
-                        "Pruebas canceladas. Se completaron " +
-                        (currentRun - 1) + " de " + totalRuns + " pruebas.",
-                        Toast.LENGTH_LONG).show();
-                })
+                .setNegativeButton("Restablecer todo", (d, w) -> restartAllTests())
                 .setCancelable(false) // No se puede cerrar sin elegir
                 .show();
         });
@@ -897,38 +914,97 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void extractMetricsThenStartNperf() {
-        if (webView == null) { transitionToNperf(); return; }
-        webView.evaluateJavascript(
-            "(function(){" +
-            "  function g(ss){for(var i=0;i<ss.length;i++){" +
-            "    var els=document.querySelectorAll(ss[i]);" +
-            "    for(var j=0;j<els.length;j++){" +
-            "      var v=els[j].textContent||'';" +
-            "      v=v.trim().replace(/[^0-9.]/g,'');" +
-            "      var n=parseFloat(v);if(!isNaN(n)&&n>0)return ''+n;" +
-            "    }}return '';}" +
-            "  return JSON.stringify({" +
-            "    dl:g(['[data-download-speed]','.download-speed','#download-value'])," +
-            "    ul:g(['[data-upload-speed]','.upload-speed','#upload-value'])," +
-            "    pg:g(['[data-latency]','.ping-speed','#ping-value'])," +
-            "    jt:g(['[data-jitter]','.jitter-speed','#jitter-value'])" +
-            "  });" +
-            "})()",
-            value -> {
-                if (value != null && !value.equals("null")) {
-                    try {
-                        String v = value.replaceAll("^\"|\"$","");
-                        String dl = key(v,"dl"), ul = key(v,"ul");
-                        String pg = key(v,"pg"), jt = key(v,"jt");
-                        if (!dl.isEmpty()) download = dl;
-                        if (!ul.isEmpty()) upload   = ul;
-                        if (!pg.isEmpty()) ping     = pg;
-                        if (!jt.isEmpty()) jitter   = jt;
-                    } catch (Exception e) { e.printStackTrace(); }
-                }
-                transitionToNperf();
+        captureSpeedtestResultMetrics();
+    }
+
+    private void captureSpeedtestResultMetrics() {
+        if (!"speedtest".equals(phase) ||
+                !speedtestResultExtractionStarted.get()) return;
+        if (webView == null) {
+            failSpeedtestMetricExtraction();
+            return;
+        }
+
+        speedtestResultExtractionAttempt++;
+        webView.evaluateJavascript(SpeedtestResultExtractor.javascript(), value -> {
+            SpeedtestResultExtractor.Metrics metrics =
+                SpeedtestResultExtractor.parse(value);
+            if (SpeedtestResultExtractor.positive(metrics.download)) {
+                download = metrics.download;
             }
-        );
+            if (SpeedtestResultExtractor.positive(metrics.upload)) {
+                upload = metrics.upload;
+            }
+            if (SpeedtestResultExtractor.positive(metrics.ping)) {
+                ping = metrics.ping;
+            }
+            if (SpeedtestResultExtractor.positive(metrics.jitter)) {
+                jitter = metrics.jitter;
+            }
+
+            showPanel();
+            if (hasStoredSpeedtestResult()) {
+                setStatus("Speedtest verificado con Result ID " + resultId +
+                    ". Abriendo nPerf...");
+                SpeedtestService.update(this,
+                    "Speedtest verificado - prueba " + currentRun,
+                    "Prueba " + currentRun + " de " + totalRuns);
+                handler.postDelayed(this::transitionToNperf, 600L);
+                return;
+            }
+
+            if (speedtestResultExtractionAttempt <
+                    MAX_SPEEDTEST_RESULT_EXTRACTION_ATTEMPTS) {
+                setStatus("Speedtest finalizó. Validando métricas, Result ID y URL (" +
+                    speedtestResultExtractionAttempt + "/" +
+                    MAX_SPEEDTEST_RESULT_EXTRACTION_ATTEMPTS + ")...");
+                handler.postDelayed(this::captureSpeedtestResultMetrics, 1500L);
+            } else {
+                failSpeedtestMetricExtraction();
+            }
+        });
+    }
+
+    private void failSpeedtestMetricExtraction() {
+        if (!speedtestResultExtractionStarted.compareAndSet(true, false)) return;
+        saved.set(false);
+        setStatus("Speedtest terminó, pero faltan métricas, Result ID o URL. Reintentando...");
+        SpeedtestService.update(this,
+            "Speedtest incompleto: métricas/Result ID/URL - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+        handler.postDelayed(this::retryRun, 1200L);
+    }
+
+    private boolean hasStoredSpeedtestResult() {
+        return SpeedtestResultExtractor.positive(download) &&
+            SpeedtestResultExtractor.positive(upload) &&
+            SpeedtestResultExtractor.positive(ping) &&
+            hasValidSpeedtestIdentity();
+    }
+
+    private boolean hasValidSpeedtestIdentity() {
+        String id = resultId == null ? "" : resultId.trim();
+        String url = resultUrl == null ? "" : resultUrl.trim();
+        if (!id.matches("[A-Za-z0-9_-]{5,}")) return false;
+        try {
+            Uri parsed = Uri.parse(url);
+            String host = parsed.getHost();
+            String path = parsed.getPath();
+            boolean validHost = host != null &&
+                (host.equalsIgnoreCase("speedtest.net") ||
+                 host.equalsIgnoreCase("www.speedtest.net") ||
+                 host.toLowerCase(Locale.ROOT).endsWith(".speedtest.net"));
+            return validHost && path != null &&
+                path.matches(".*/result/" + Pattern.quote(id) + "/?");
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean hasStoredNperfResult() {
+        return NperfResultParser.positive(nDownload) &&
+            NperfResultParser.positive(nUpload) &&
+            NperfResultParser.positive(nPing);
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -1014,6 +1090,17 @@ public class MainActivity extends AppCompatActivity {
     // ══════════════════════════════════════════════════════════════════════
     private void saveTxt() {
         if (!"nperf".equals(phase) || !nSaved.get()) return;
+        if (!hasStoredSpeedtestResult()) {
+            setStatus("No se guardó: faltan métricas, Result ID o URL verificados de Speedtest.");
+            showErrorDialog();
+            return;
+        }
+        if (!hasStoredNperfResult()) {
+            nSaved.set(false);
+            showNperfBrowserDecision("INCOMPLETE_RESULT",
+                "nPerf no devolvió descarga, subida y latencia válidas");
+            return;
+        }
         if (!finalSaveStarted.compareAndSet(false, true)) return;
         setStatus("Guardando resultado en Google Drive...");
 
@@ -1035,13 +1122,12 @@ public class MainActivity extends AppCompatActivity {
             "  Subida       : " + f(upload,  "Mbps") + "\n" +
             "  Ping         : " + f(ping,    "ms")   + "\n" +
             "  Jitter       : " + f(jitter,  "ms")   + "\n" +
-            "  Result ID    : " + (resultId.isEmpty()  ? "N/A" : resultId)  + "\n" +
-            "  URL          : " + (resultUrl.isEmpty() ? "N/A" : resultUrl) + "\n\n" +
+            "  Result ID    : " + resultId + "\n" +
+            "  URL          : " + resultUrl + "\n\n" +
             "-- NPERF.COM --\n" +
             "  Descarga     : " + f(nDownload,"Mb/s") + "\n" +
             "  Subida       : " + f(nUpload,  "Mb/s") + "\n" +
             "  Latencia     : " + f(nPing,    "ms")   + "\n" +
-            "  Jitter       : " + f(nJitter,  "ms")   + "\n" +
             "  Servidor     : " + (nServer.isEmpty()   ? "N/A" : nServer)   + "\n" +
             "  Operador     : " + (nOperator.isEmpty() ? "N/A" : nOperator) + "\n" +
             "  Result ID    : " + (nResultId.isEmpty() ? "N/A" : nResultId) + "\n" +
@@ -1053,68 +1139,207 @@ public class MainActivity extends AppCompatActivity {
         String finalTxt = txt;
         String fileName = base + ".txt";
 
-        new Thread(() -> {
-            boolean ok = uploadToDrive(fileName, finalTxt);
-            handler.post(() -> onRunComplete(ok));
-        }).start();
+        pendingSaveFileName = fileName;
+        pendingSaveContent = finalTxt;
+        beginPendingResultUpload(fileName, finalTxt);
     }
 
-    private boolean uploadToDrive(String fileName, String content) {
-        java.net.HttpURLConnection conn = null;
-        try {
-            String jsonBody = "{" +
-                "\"fileName\":\"" + fileName + "\"," +
-                "\"content\":\"" + content
-                    .replace("\\", "\\\\")
-                    .replace("\"", "\\\"")
-                    .replace("\n", "\\n")
-                    .replace("\r", "\\r") +
-                "\"" +
-            "}";
+    private void beginPendingResultUpload(String fileName, String content) {
+        setStatus("Guardando copia local antes de subir a Drive...");
+        SpeedtestService.update(this,
+            "Guardando prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
 
-            byte[] body = jsonBody.getBytes("UTF-8");
-            java.net.URL url = new java.net.URL(DRIVE_SCRIPT_URL);
-            conn = (java.net.HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setDoOutput(true);
-            conn.setConnectTimeout(15000);
-            conn.setReadTimeout(15000);
-            conn.setRequestProperty("Content-Type", "application/json");
-            conn.setInstanceFollowRedirects(true);
+        ResultSaveManager.persistAndUpload(this, DRIVE_SCRIPT_URL,
+            fileName, content, new ResultSaveManager.Callback() {
+                @Override
+                public void onStatus(String message) {
+                    handler.post(() -> {
+                        setStatus(message);
+                        SpeedtestService.update(MainActivity.this, message,
+                            "Prueba " + currentRun + " de " + totalRuns);
+                    });
+                }
 
-            java.io.OutputStream os = conn.getOutputStream();
-            os.write(body);
-            os.flush();
-            os.close();
+                @Override
+                public void onSuccess(File localFile) {
+                    handler.post(() -> {
+                        pendingSaveFileName = "";
+                        pendingSaveContent = "";
+                        driveSaveDecisionVisible = false;
+                        setStatus("Guardado confirmado en Google Drive: " + fileName);
+                        onRunComplete(true);
+                    });
+                }
 
-            int code = conn.getResponseCode();
-            java.io.BufferedReader br = new java.io.BufferedReader(
-                new java.io.InputStreamReader(
-                    code == 200 ? conn.getInputStream() : conn.getErrorStream()));
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = br.readLine()) != null) sb.append(line);
-            br.close();
+                @Override
+                public void onFailure(String detail, File localFile) {
+                    handler.post(() -> {
+                        finalSaveStarted.set(false);
+                        String localPath = localFile == null ? "" : localFile.getAbsolutePath();
+                        showDriveSaveDecision(detail, localPath);
+                    });
+                }
+            });
+    }
 
-            String response = sb.toString();
-            boolean success = response.contains("ok");
+    private void showDriveSaveDecision(String detail, String localPath) {
+        if (driveSaveDecisionVisible) return;
+        driveSaveDecisionVisible = true;
 
-            handler.post(() -> setStatus(success
-                ? "Guardado en Google Drive: " + fileName
-                : "Error al subir a Drive"));
+        String safeDetail = valueOrEmpty(detail);
+        if (safeDetail.isEmpty()) safeDetail = "Google Drive no confirmó la carga";
+        String locationText = valueOrEmpty(localPath).isEmpty()
+            ? "No se pudo confirmar una copia local."
+            : "El TXT quedó protegido localmente y no se repetirá la medición.";
 
-            return success;
+        setStatus("Resultado pendiente de Google Drive: " + safeDetail);
+        SpeedtestService.update(this,
+            "Resultado pendiente de Drive - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
 
-        } catch (Exception e) {
-            e.printStackTrace();
-            handler.post(() -> setStatus("Error conexion Drive: " + e.getMessage()));
-            return false;
-        } finally {
-            if (conn != null) conn.disconnect();
+        final String message = safeDetail;
+        new AlertDialog.Builder(this)
+            .setTitle("No se confirmó el guardado en Drive")
+            .setMessage(message + "\n\n" + locationText +
+                "\n\nLa siguiente prueba no comenzará hasta confirmar esta carga.")
+            .setPositiveButton("Reintentar subida", (dialog, which) -> {
+                driveSaveDecisionVisible = false;
+                if (pendingSaveFileName.isEmpty() || pendingSaveContent.isEmpty()) {
+                    setStatus("No hay un resultado pendiente disponible para reintentar.");
+                    return;
+                }
+                if (!finalSaveStarted.compareAndSet(false, true)) return;
+                beginPendingResultUpload(pendingSaveFileName, pendingSaveContent);
+            })
+            .setNegativeButton("Detener", (dialog, which) -> {
+                driveSaveDecisionVisible = false;
+                isRunning = false;
+                releaseWakeLock();
+                SpeedtestService.stop(this);
+                setStatus("Proceso detenido. El resultado pendiente no fue descartado.");
+            })
+            .setCancelable(false)
+            .show();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // NPERF EN CUSTOM TAB — navegador completo + AccessibilityService
+    // ══════════════════════════════════════════════════════════════════════
+    private void startNperfBrowser() {
+        if (!"nperf".equals(phase) || nSaved.get() || finalSaveStarted.get()) return;
+        if (nperfBrowserActive) return;
+        if (!isWifiConnected()) {
+            showNoWifiDialog(this::startNperfBrowser);
+            return;
         }
+        if (!isConnected()) {
+            showNoInternetDialog(this::startNperfBrowser);
+            return;
+        }
+
+        nperfBrowserActive = true;
+        nErrorDetected.set(false);
+        setStatus("Speedtest OK. Abriendo nPerf en navegador completo...");
+        SpeedtestService.update(this,
+            "Abriendo nPerf en navegador - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+
+        Intent intent = new Intent(this, NperfBrowserActivity.class)
+            .putExtra(NperfBrowserActivity.EXTRA_RUN, currentRun)
+            .putExtra(NperfBrowserActivity.EXTRA_TOTAL, totalRuns);
+        nperfBrowserLauncher.launch(intent);
     }
 
+    private void handleNperfBrowserResult(ActivityResult activityResult) {
+        nperfBrowserActive = false;
+        if (!"nperf".equals(phase) || nSaved.get() || finalSaveStarted.get()) return;
 
+        Intent data = activityResult == null ? null : activityResult.getData();
+        if (activityResult != null && activityResult.getResultCode() == RESULT_OK &&
+                data != null) {
+            nDownload = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_DOWNLOAD));
+            nUpload = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_UPLOAD));
+            nPing = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_LATENCY));
+            nJitter = "";
+            nServer = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_SERVER));
+            nOperator = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_OPERATOR));
+            nResultId = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_RESULT_ID));
+            nResultUrl = valueOrEmpty(data.getStringExtra(
+                NperfBrowserCoordinator.EXTRA_RESULT_URL));
+
+            if (!hasStoredNperfResult()) {
+                showNperfBrowserDecision(
+                    "INCOMPLETE_RESULT",
+                    "nPerf devolvió un resultado sin descarga, subida o latencia válida");
+                return;
+            }
+
+            if (nSaved.compareAndSet(false, true)) {
+                nDone = true;
+                progressBar.setVisibility(View.GONE);
+                showPanel();
+                setStatus("nPerf completo. Generando TXT combinado...");
+                SpeedtestService.update(this,
+                    "nPerf completo - guardando prueba " + currentRun,
+                    "Prueba " + currentRun + " de " + totalRuns);
+                handler.postDelayed(this::saveTxt, 700L);
+            }
+            return;
+        }
+
+        String code = data == null ? "NPERF_BROWSER_CANCELLED" :
+            valueOrEmpty(data.getStringExtra(NperfBrowserCoordinator.EXTRA_STATE));
+        String detail = data == null ? "nPerf terminó sin devolver resultados" :
+            valueOrEmpty(data.getStringExtra(NperfBrowserCoordinator.EXTRA_DETAIL));
+        if (detail.isEmpty()) detail = "nPerf no devolvió un resultado completo";
+        showNperfBrowserDecision(code, detail);
+    }
+
+    private void showNperfBrowserDecision(String code, String detail) {
+        if (nperfDecisionVisible) return;
+        nperfDecisionVisible = true;
+        String safeCode = valueOrEmpty(code);
+        String safeDetail = valueOrEmpty(detail);
+        if (safeCode.isEmpty()) safeCode = "NPERF_BROWSER_ERROR";
+        if (safeDetail.isEmpty()) safeDetail = "nPerf no completó la prueba";
+
+        setStatus("Error nPerf: " + safeDetail);
+        SpeedtestService.update(this,
+            "Error nPerf " + safeCode + " - prueba " + currentRun,
+            "Prueba " + currentRun + " de " + totalRuns);
+
+        final String message = safeDetail;
+        handler.post(() -> new AlertDialog.Builder(this)
+            .setTitle("nPerf no completó la prueba")
+            .setMessage(
+                message + "\n\n" +
+                "Los resultados de Speedtest se conservan. Puede reintentar " +
+                "únicamente nPerf o detener el proceso. No se generará un TXT incompleto.")
+            .setPositiveButton("Intentar de nuevo", (dialog, which) -> {
+                nperfDecisionVisible = false;
+                nErrorDetected.set(false);
+                nperfBrowserActive = false;
+                setStatus("Reintentando únicamente nPerf...");
+                handler.postDelayed(this::startNperfBrowser, 700L);
+            })
+            .setNegativeButton("Restablecer todo", (dialog, which) -> {
+                nperfDecisionVisible = false;
+                restartAllTests();
+            })
+            .setCancelable(false)
+            .show());
+    }
+
+    private String valueOrEmpty(String value) {
+        return value == null ? "" : value.trim();
+    }
 
     private void setupNperfAutomation() {
         nperfAutomation = new NperfAutomation(webView, handler,
@@ -1387,7 +1612,7 @@ public class MainActivity extends AppCompatActivity {
             if (dl  != null && !dl.isEmpty())  { nDownload  = dl;         updated = true; }
             if (ul  != null && !ul.isEmpty())  { nUpload    = ul;         updated = true; }
             if (pg  != null && !pg.isEmpty())  { nPing      = pg;         updated = true; }
-            if (jt  != null && !jt.isEmpty())  { nJitter    = jt;         updated = true; }
+            nJitter = "";
             if (srv != null && !srv.isEmpty()) { nServer    = srv.trim(); updated = true; }
             if (op  != null && !op.isEmpty())  { nOperator  = op.trim();  updated = true; }
             // Mostrar en panel en tiempo real
@@ -1454,7 +1679,7 @@ public class MainActivity extends AppCompatActivity {
                 if (!dl.isEmpty())  nDownload  = dl;
                 if (!ul.isEmpty())  nUpload    = ul;
                 if (!pg.isEmpty())  nPing      = pg;
-                if (!jt.isEmpty())  nJitter    = jt;
+                nJitter = "";
                 if (!srv.isEmpty()) nServer    = srv.trim();
                 if (!op.isEmpty())  nOperator  = op.trim();
                 handler.post(this::showPanel);
@@ -1469,6 +1694,12 @@ public class MainActivity extends AppCompatActivity {
     private void onRunComplete(boolean success) {
         progressBar.setVisibility(View.GONE);
         showPanel();
+
+        if (!success) {
+            finalSaveStarted.set(false);
+            setStatus("La prueba no avanzará hasta guardar el resultado.");
+            return;
+        }
 
         if (currentRun < totalRuns) {
             String msg = "Prueba " + currentRun +
@@ -1494,6 +1725,7 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this,
                 "Todas las pruebas completadas (" + totalRuns + ")",
                 Toast.LENGTH_LONG).show();
+            showCompletedDialog();
         }
     }
 
@@ -1596,6 +1828,8 @@ public class MainActivity extends AppCompatActivity {
         pollCount = 0;
         saved.set(false);
         errorDetected.set(false);
+        speedtestResultExtractionStarted.set(false);
+        speedtestResultExtractionAttempt = 0;
         setSpeedtestUserAgent();
         clearWebViewSession(false);
         webView.loadUrl(SPEEDTEST_URL);
@@ -1605,23 +1839,24 @@ public class MainActivity extends AppCompatActivity {
 
     private void completeSpeedtestFromUrl(String url) {
         if (url != null) {
-            Matcher matcher = Pattern.compile("result/([\\w-]+)").matcher(url);
-            if (matcher.find()) resultId = matcher.group(1);
-            resultUrl = url;
+            Matcher matcher = Pattern.compile("/result/([\\w-]+)(?:/|$)").matcher(url);
+            if (matcher.find()) {
+                resultId = matcher.group(1);
+                resultUrl = url;
+            }
         }
         completeSpeedtest();
     }
 
     private void completeSpeedtest() {
-        if (!"speedtest".equals(phase) || !saved.compareAndSet(false, true)) return;
-        handler.post(() -> {
-            showPanel();
-            if (!isInBackground && webView != null) {
-                extractMetricsThenStartNperf();
-            } else {
-                transitionToNperf();
-            }
-        });
+        if (!"speedtest".equals(phase) ||
+                !speedtestResultExtractionStarted.compareAndSet(false, true)) {
+            return;
+        }
+        saved.set(true);
+        speedtestResultExtractionAttempt = 0;
+        setStatus("Speedtest finalizado. Validando descarga, subida, ping y jitter...");
+        handler.post(this::extractMetricsThenStartNperf);
     }
 
     private void transitionToNperf() {
@@ -1633,13 +1868,13 @@ public class MainActivity extends AppCompatActivity {
         SpeedtestService.update(this,
             "Iniciando nperf - prueba " + currentRun,
             "Prueba " + currentRun + " de " + totalRuns);
-        handler.postDelayed(this::startNperf, 2000);
+        handler.postDelayed(this::startNperfBrowser, 1200);
     }
 
     private void resumeCurrentPhaseAfterConnection() {
         if ("nperf".equals(phase)) {
             nErrorDetected.set(false);
-            handler.postDelayed(this::startNperf, 1000);
+            handler.postDelayed(this::startNperfBrowser, 1000);
         } else {
             errorDetected.set(false);
             handler.postDelayed(this::reloadSpeedtestCurrentAttempt, 1000);
@@ -1655,7 +1890,7 @@ public class MainActivity extends AppCompatActivity {
             SpeedtestService.update(this,
                 "Reintentando nperf - prueba " + currentRun,
                 "Prueba " + currentRun + " de " + totalRuns);
-            handler.postDelayed(this::startNperf, 3000);
+            handler.postDelayed(this::startNperfBrowser, 1500);
         } else {
             showErrorDialog();
         }
@@ -1755,6 +1990,7 @@ public class MainActivity extends AppCompatActivity {
     private void showPanel() {
         layoutResults.setVisibility(View.VISIBLE);
         if (phase.equals("nperf")) {
+            if (layoutJitter != null) layoutJitter.setVisibility(View.GONE);
             // Mostrar valores de nperf
             tvResultId.setText(!nResultId.isEmpty()
                 ? "nPerf ID: " + nResultId
@@ -1762,8 +1998,8 @@ public class MainActivity extends AppCompatActivity {
             tvDownload.setText(nDownload.isEmpty() ? "-" : nDownload + " Mb/s");
             tvUpload.setText(nUpload.isEmpty()     ? "-" : nUpload   + " Mb/s");
             tvPing.setText(nPing.isEmpty()         ? "-" : nPing     + " ms");
-            tvJitter.setText(nJitter.isEmpty()     ? "-" : nJitter   + " ms");
         } else {
+            if (layoutJitter != null) layoutJitter.setVisibility(View.VISIBLE);
             // Mostrar valores de speedtest
             tvResultId.setText("Result ID: " + (resultId.isEmpty() ? "N/A" : resultId));
             tvDownload.setText(download.isEmpty() ? "-" : download + " Mbps");
@@ -1775,7 +2011,41 @@ public class MainActivity extends AppCompatActivity {
 
     private void setStatus(String m) { handler.post(() -> tvStatus.setText(m)); }
 
-    // ── DEBUG: muestra HTML de la página actual ────────────────────────────
+    private void showCompletedDialog() {
+        if (completionDialogVisible || isFinishing()) return;
+        completionDialogVisible = true;
+        handler.post(() -> new AlertDialog.Builder(this)
+            .setTitle("Pruebas completadas")
+            .setMessage("Se guardaron " + totalRuns +
+                " pruebas correctamente en Google Drive.")
+            .setPositiveButton("Ejecutar de nuevo", (dialog, which) -> {
+                completionDialogVisible = false;
+                restartAllTests();
+            })
+            .setNegativeButton("Cerrar", (dialog, which) -> {
+                completionDialogVisible = false;
+                finishAndRemoveTask();
+            })
+            .setCancelable(false)
+            .show());
+    }
+
+    private void restartAllTests() {
+        handler.removeCallbacksAndMessages(null);
+        if (nperfAutomation != null) nperfAutomation.cancel();
+        nperfPollingSession++;
+        NperfBrowserCoordinator.cancel(this, null);
+        SpeedtestService.stop(this);
+        releaseWakeLock();
+        isRunning = false;
+
+        Intent restart = new Intent(this, RestartableMainActivity.class);
+        restart.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK |
+            Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(restart);
+        finish();
+    }
+
     private String f(String v, String u) {
         return (v == null || v.isEmpty()) ? "N/A" : v + " " + u;
     }
