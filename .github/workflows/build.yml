@@ -88,3 +88,12 @@ jobs:
               --title "SpeedtestNL build 341" \
               --notes "Build 341: corrección de lectura de descarga/subida en nPerf, eliminación de jitter de nPerf y mejoras de reintento/restablecimiento."
           fi
+
+      - name: Publish success details
+        if: steps.android_build.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "CI build 341 succeeded - run ${GITHUB_RUN_ID}" \
+            --body "APK generado correctamente. Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
