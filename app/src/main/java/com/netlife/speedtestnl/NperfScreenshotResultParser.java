@@ -48,9 +48,9 @@ final class NperfScreenshotResultParser {
         "(?i)m(?:illi)?s(?:ec(?:ond)?s?)?\\s*[:=-]?\\s*" +
         "([0-9]{1,5}(?:[.,][0-9]{1,3})?)");
     private static final Pattern NUMBER_ONLY = Pattern.compile(
-        "^[\s↓⬇⇩▼⭣▾↑⬆⇧▲⭡▴]*" +
+        "^[\\s↓⬇⇩▼⭣▾↑⬆⇧▲⭡▴]*" +
         "([0-9]{1,5}(?:[.,][0-9]{1,3})?)" +
-        "[\s↓⬇⇩▼⭣▾↑⬆⇧▲⭡▴]*$");
+        "[\\s↓⬇⇩▼⭣▾↑⬆⇧▲⭡▴]*$");
     private static final Pattern AVERAGE_LABEL = Pattern.compile(
         "(?iu)\\b(m[eé]dia|average|avg|promedio|moyenne)\\b");
 
