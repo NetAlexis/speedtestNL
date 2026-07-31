@@ -38,15 +38,21 @@ final class NperfScreenshotResultParser {
 
     private static final Pattern THROUGHPUT_VALUE_UNIT = Pattern.compile(
         "(?i)([0-9]{1,5}(?:[.,][0-9]{1,3})?)\\s*" +
-        "(gbit/s|gb/s|gbps|mbit/s|mb/s|mbps|mbits/s|mbit\\s*/\\s*s)");
+        "(gbit/s|gb/s|gbps|mbit/s|mb/s|mbps|mbits/s|mbit\\s*/\\s*s|mbit|mbits)");
     private static final Pattern THROUGHPUT_UNIT_VALUE = Pattern.compile(
-        "(?i)(gbit/s|gb/s|gbps|mbit/s|mb/s|mbps|mbits/s|mbit\\s*/\\s*s)" +
+        "(?i)(gbit/s|gb/s|gbps|mbit/s|mb/s|mbps|mbits/s|mbit\\s*/\\s*s|mbit|mbits)" +
         "\\s*[:=-]?\\s*([0-9]{1,5}(?:[.,][0-9]{1,3})?)");
     private static final Pattern LATENCY_VALUE_UNIT = Pattern.compile(
         "(?i)([0-9]{1,5}(?:[.,][0-9]{1,3})?)\\s*m(?:illi)?s(?:ec(?:ond)?s?)?");
     private static final Pattern LATENCY_UNIT_VALUE = Pattern.compile(
         "(?i)m(?:illi)?s(?:ec(?:ond)?s?)?\\s*[:=-]?\\s*" +
         "([0-9]{1,5}(?:[.,][0-9]{1,3})?)");
+    private static final Pattern NUMBER_ONLY = Pattern.compile(
+        "^[\s↓⬇⇩▼⭣▾↑⬆⇧▲⭡▴]*" +
+        "([0-9]{1,5}(?:[.,][0-9]{1,3})?)" +
+        "[\s↓⬇⇩▼⭣▾↑⬆⇧▲⭡▴]*$");
+    private static final Pattern AVERAGE_LABEL = Pattern.compile(
+        "(?iu)\\b(m[eé]dia|average|avg|promedio|moyenne)\\b");
 
     private static final class Candidate {
         final String value;
@@ -85,6 +91,8 @@ final class NperfScreenshotResultParser {
             return result;
         }
 
+        lines = expandSplitMetricLines(lines, imageWidth, imageHeight);
+
         List<Candidate> throughput = new ArrayList<>();
         List<Candidate> latency = new ArrayList<>();
         List<Marker> markers = new ArrayList<>();
@@ -102,33 +110,40 @@ final class NperfScreenshotResultParser {
 
         for (Line line : lines) {
             if (!isUsefulLine(line, imageWidth, imageHeight)) continue;
-            String normalized = normalize(line.text);
-            if (isAverageLine(normalized)) continue;
+            String primaryText = stripAveragePortion(line.text);
+            String normalized = normalize(primaryText);
+            if (normalized.isEmpty()) continue;
 
-            Role role = roleFor(line.text);
+            Role role = roleFor(primaryText);
             if (role != null) markers.add(new Marker(role, line.bounds));
             boolean explicitPrimaryRole = role == Role.DOWNLOAD ||
                 role == Role.UPLOAD || role == Role.LATENCY;
-            if (!explicitPrimaryRole && isDetachedAverageValue(line.bounds,
-                    averageMarkers, imageWidth, imageHeight)) {
+            MetricValue throughputValue = parseThroughput(primaryText);
+            String latencyValue = parseLatency(primaryText);
+            boolean hasPrimaryMetric = throughputValue != null ||
+                !latencyValue.isEmpty();
+            boolean primaryBeforeAverage = hasPrimaryMetric &&
+                !primaryText.equals(line.text == null ? "" : line.text.trim());
+            if (!explicitPrimaryRole && !primaryBeforeAverage &&
+                    isDetachedAverageValue(line.bounds,
+                        averageMarkers, imageWidth, imageHeight)) {
                 continue;
             }
 
-            MetricValue throughputValue = parseThroughput(line.text);
-            if (throughputValue != null && !looksLikeServerCapacityLine(line.text)) {
+            if (throughputValue != null &&
+                    !looksLikeServerCapacityLine(primaryText)) {
                 double score = visualScore(line.bounds, imageWidth, imageHeight,
                     role == Role.DOWNLOAD || role == Role.UPLOAD, normalized);
-                throughput.add(new Candidate(throughputValue.value, line.text,
+                throughput.add(new Candidate(throughputValue.value, primaryText,
                     line.bounds,
                     role == Role.DOWNLOAD || role == Role.UPLOAD ? role : null,
                     score));
             }
 
-            String latencyValue = parseLatency(line.text);
             if (!latencyValue.isEmpty() && !containsAny(normalized, "jitter")) {
                 double score = visualScore(line.bounds, imageWidth, imageHeight,
                     role == Role.LATENCY, normalized);
-                latency.add(new Candidate(latencyValue, line.text, line.bounds,
+                latency.add(new Candidate(latencyValue, primaryText, line.bounds,
                     role == Role.LATENCY ? role : null, score));
             }
         }
@@ -170,6 +185,93 @@ final class NperfScreenshotResultParser {
         if (ping != null) result.latency = ping.value;
         result.jitter = "";
         return result;
+    }
+
+    private static List<Line> expandSplitMetricLines(List<Line> source,
+            int width, int height) {
+        List<Line> expanded = new ArrayList<>(source);
+        List<Rect> averageLabels = new ArrayList<>();
+        for (Line line : source) {
+            if (line != null && !line.bounds.isEmpty() &&
+                    isAverageLine(normalize(line.text))) {
+                averageLabels.add(new Rect(line.bounds));
+            }
+        }
+        for (int i = 0; i < source.size(); i++) {
+            Line numberLine = source.get(i);
+            String number = numberOnly(numberLine == null ? "" : numberLine.text);
+            if (number.isEmpty() || numberLine.bounds.isEmpty()) continue;
+
+            for (int j = 0; j < source.size(); j++) {
+                if (i == j) continue;
+                Line unitLine = source.get(j);
+                if (unitLine == null || unitLine.bounds.isEmpty()) continue;
+                String unit = metricUnitOnly(unitLine.text);
+                if (unit.isEmpty() ||
+                        !nearbyMetricFragments(numberLine.bounds, unitLine.bounds,
+                            width, height) ||
+                        averageLabelBetween(numberLine.bounds, unitLine.bounds,
+                            averageLabels)) {
+                    continue;
+                }
+                Rect union = new Rect(numberLine.bounds);
+                union.union(unitLine.bounds);
+                expanded.add(new Line(number + " " + unit, union));
+            }
+        }
+        return expanded;
+    }
+
+    private static String numberOnly(String source) {
+        Matcher matcher = NUMBER_ONLY.matcher(source == null ? "" : source.trim());
+        return matcher.matches() ? matcher.group(1) : "";
+    }
+
+    private static String metricUnitOnly(String source) {
+        String unit = normalize(source).replace(" ", "");
+        if (unit.matches("(?:gbit/s|gb/s|gbps|mbit/s|mb/s|mbps|mbits/s|mbit|mbits)")) {
+            return unit;
+        }
+        if (unit.matches("m(?:illi)?s(?:ec(?:ond)?s?)?")) return "ms";
+        return "";
+    }
+
+    private static boolean averageLabelBetween(Rect first, Rect second,
+            List<Rect> averages) {
+        float minX = Math.min(first.exactCenterX(), second.exactCenterX());
+        float maxX = Math.max(first.exactCenterX(), second.exactCenterX());
+        float centerY = (first.exactCenterY() + second.exactCenterY()) / 2f;
+        for (Rect average : averages) {
+            float tolerance = Math.max(Math.max(first.height(), second.height()),
+                average.height()) * 1.5f + 8f;
+            if (Math.abs(average.exactCenterY() - centerY) <= tolerance &&
+                    average.exactCenterX() > minX &&
+                    average.exactCenterX() < maxX) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean nearbyMetricFragments(Rect number, Rect unit,
+            int width, int height) {
+        float dy = Math.abs(number.exactCenterY() - unit.exactCenterY());
+        float dx = Math.abs(number.exactCenterX() - unit.exactCenterX());
+        int horizontalGap = Math.max(0,
+            Math.max(number.left, unit.left) - Math.min(number.right, unit.right));
+        int verticalGap = Math.max(0,
+            Math.max(number.top, unit.top) - Math.min(number.bottom, unit.bottom));
+        boolean sameRow = dy <= Math.max(number.height(), unit.height()) * 1.35f + 10f &&
+            horizontalGap <= Math.max(number.height(), unit.height()) * 2.0f + 12f;
+        boolean stacked = dx <= Math.max(number.width(), unit.width()) * 0.60f + 12f &&
+            verticalGap <= Math.max(number.height(), unit.height()) * 1.20f + 12f;
+        return sameRow || stacked;
+    }
+
+    private static String stripAveragePortion(String source) {
+        if (source == null || source.trim().isEmpty()) return "";
+        Matcher matcher = AVERAGE_LABEL.matcher(source);
+        return matcher.find() ? source.substring(0, matcher.start()).trim() : source.trim();
     }
 
     private static Role roleFor(String raw) {
@@ -221,8 +323,10 @@ final class NperfScreenshotResultParser {
             boolean sameRow = dy <= sameRowTolerance &&
                 candidate.left >= average.left - width * 0.08f &&
                 candidate.left <= average.right + width * 0.62f;
-            boolean stacked = candidate.exactCenterY() >= average.exactCenterY() &&
-                candidate.top <= average.bottom + height * 0.055f &&
+            float stackedTolerance = Math.max(average.height(),
+                candidate.height()) * 0.90f + 10f;
+            boolean stacked = candidate.top >= average.bottom - 6 &&
+                candidate.top <= average.bottom + stackedTolerance &&
                 dx <= width * 0.38f;
             if (sameRow || stacked) return true;
         }

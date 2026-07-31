@@ -10,8 +10,8 @@ android {
         applicationId "com.netlife.speedtestnl"
         minSdk 24
         targetSdk 34
-        versionCode 16
-        versionName "2.5-build340-final-fixes"
+        versionCode 17
+        versionName "2.6-nperf-final-screen-ocr"
     }
 
     buildTypes {

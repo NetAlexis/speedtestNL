@@ -25,6 +25,7 @@ import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+import com.google.android.gms.tasks.Tasks;
 
 import java.text.Normalizer;
 import java.util.ArrayList;
@@ -34,6 +35,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Accessibility controller for the public nPerf page running in a Custom Tab.
@@ -54,7 +56,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     private static final long START_DATA_TIMEOUT_MS = 120 * 1000L;
     private static final long OCR_START_AFTER_MS = 18 * 1000L;
     private static final long OCR_START_WHILE_UNCONFIRMED_MS = 12 * 1000L;
-    private static final long OCR_RETRY_INTERVAL_MS = 7000L;
+    private static final long OCR_RETRY_INTERVAL_MS = 3500L;
     private static final long MIN_COMPLETE_AFTER_START_MS = 28 * 1000L;
     private static final long STABLE_RESULT_COMPLETE_MS = 12 * 1000L;
     private static final long STABLE_RESULT_FALLBACK_MIN_MS = 45 * 1000L;
@@ -63,7 +65,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
     private static final long MIN_INSPECTION_INTERVAL_MS = 900L;
     private static final int MAX_ACCESSIBILITY_TEXT_LINES = 500;
     private static final int MAX_START_ATTEMPTS = 3;
-    private static final int MAX_OCR_ATTEMPTS = 10;
+    private static final int MAX_OCR_ATTEMPTS = 20;
 
     private enum Stage {
         WAITING_PAGE,
@@ -313,6 +315,22 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             return;
         }
 
+        // The current public nPerf page finishes with the short controls
+        // “Reiniciar” and “Compartir”. They can appear even when Chrome does
+        // not expose the metric card through accessibility. Treat that exact
+        // final screen as an immediate request for a visual OCR capture,
+        // regardless of the previous internal stage.
+        boolean finalScreenVisible = firstStartRequestAt > 0L &&
+            now - firstStartRequestAt >= MIN_COMPLETE_AFTER_START_MS &&
+            containsFinalScreenCue(normalized);
+        if (finalScreenVisible) {
+            ensureRunningForVisualResult(now);
+            status("FINAL_SCREEN",
+                "nPerf finalizó. Capturando y ampliando el panel de resultados...");
+            requestVisualResultOcr(true, now);
+            return;
+        }
+
         switch (stage) {
             case WAITING_PAGE:
                 status("WAITING_PAGE", "Esperando que nPerf prepare el medidor...");
@@ -479,10 +497,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
         long sinceConfirmed = now - startConfirmedAt;
         boolean throughput = hasValidThroughput(currentResult);
         boolean latencyReady = NperfResultParser.positive(currentResult.latency);
-        boolean explicitComplete = containsAny(normalized,
-            "probar de nuevo", "reiniciar test", "restart test",
-            "compartir resultado", "share result",
-            "resultado completo", "test finalizado", "prueba finalizada");
+        boolean explicitComplete = containsFinalScreenCue(normalized);
 
         if (!throughput || !latencyReady) {
             boolean shouldUseVisualResult = explicitComplete ||
@@ -574,17 +589,31 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             });
     }
 
+    private static final class VisualOcrRead {
+        final NperfBrowserCoordinator.Result result;
+        final String text;
+        final boolean completionCue;
+
+        VisualOcrRead(NperfBrowserCoordinator.Result result, String text,
+                boolean completionCue) {
+            this.result = result == null
+                ? new NperfBrowserCoordinator.Result() : result;
+            this.text = text == null ? "" : text;
+            this.completionCue = completionCue;
+        }
+    }
+
     @SuppressLint("NewApi")
     private void processScreenshotResult(ScreenshotResult screenshotResult,
             boolean explicitComplete) {
         HardwareBuffer buffer = screenshotResult.getHardwareBuffer();
         Bitmap hardwareBitmap = null;
-        Bitmap softwareBitmap = null;
+        Bitmap sourceBitmap = null;
         try {
             hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer,
                 screenshotResult.getColorSpace());
             if (hardwareBitmap != null) {
-                softwareBitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false);
+                sourceBitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false);
             }
         } catch (Exception error) {
             Log.e(TAG, "Unable to convert nPerf screenshot", error);
@@ -592,7 +621,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             buffer.close();
         }
 
-        if (softwareBitmap == null) {
+        if (sourceBitmap == null) {
             handler.post(() -> {
                 ocrInProgress = false;
                 status("OCR_BITMAP_FAILED", "No se pudo preparar la captura nPerf...");
@@ -600,53 +629,95 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             return;
         }
 
-        Bitmap preparedBitmap = softwareBitmap;
-        if (preparedBitmap.getWidth() > 900) {
-            int scaledHeight = Math.max(1,
-                Math.round(preparedBitmap.getHeight() * 900f / preparedBitmap.getWidth()));
-            Bitmap scaled = Bitmap.createScaledBitmap(
-                preparedBitmap, 900, scaledHeight, true);
-            preparedBitmap.recycle();
-            preparedBitmap = scaled;
-        }
-
         if (textRecognizer == null) {
             textRecognizer = TextRecognition.getClient(
                 TextRecognizerOptions.DEFAULT_OPTIONS);
         }
 
-        final Bitmap bitmap = preparedBitmap;
-        final int width = bitmap.getWidth();
-        final int height = bitmap.getHeight();
-        InputImage image = InputImage.fromBitmap(bitmap, 0);
-        textRecognizer.process(image)
-            .addOnSuccessListener(ocrExecutor, visionText -> {
-                List<NperfScreenshotResultParser.Line> lines = new ArrayList<>();
-                for (Text.TextBlock block : visionText.getTextBlocks()) {
-                    for (Text.Line line : block.getLines()) {
-                        Rect bounds = line.getBoundingBox();
-                        if (bounds != null && !line.getText().trim().isEmpty()) {
-                            lines.add(new NperfScreenshotResultParser.Line(
-                                line.getText(), bounds));
-                        }
-                    }
+        Bitmap resultCrop = null;
+        try {
+            // The actual values are rendered in a very small central card.
+            // OCR the enlarged card first; keep the full-resolution screenshot
+            // as a fallback instead of shrinking the whole screen to 900 px.
+            resultCrop = buildResultCrop(sourceBitmap);
+            VisualOcrRead cropRead = recognizeVisualBitmap(resultCrop);
+
+            NperfBrowserCoordinator.Result merged =
+                new NperfBrowserCoordinator.Result();
+            mergeValidatedMetrics(merged, cropRead.result);
+            String recognizedText = "CROP: " + cropRead.text;
+            boolean completionCue = cropRead.completionCue;
+
+            if (!NperfResultParser.hasRequiredMetrics(merged)) {
+                VisualOcrRead fullRead = recognizeVisualBitmap(sourceBitmap);
+                mergeValidatedMetrics(merged, fullRead.result);
+                completionCue = completionCue || fullRead.completionCue;
+                recognizedText += " | FULL: " + fullRead.text;
+            }
+
+            final NperfBrowserCoordinator.Result finalResult = merged;
+            final String finalText = recognizedText;
+            final boolean finalComplete = explicitComplete || completionCue;
+            handler.post(() -> applyVisualTextResult(
+                finalResult, finalText, finalComplete));
+        } catch (Exception error) {
+            Log.e(TAG, "ML Kit could not read nPerf result", error);
+            handler.post(() -> status("OCR_FAILED",
+                "No se pudo leer el panel nPerf; reintentando..."));
+        } finally {
+            if (resultCrop != null && resultCrop != sourceBitmap &&
+                    !resultCrop.isRecycled()) {
+                resultCrop.recycle();
+            }
+            if (!sourceBitmap.isRecycled()) sourceBitmap.recycle();
+            handler.post(() -> ocrInProgress = false);
+        }
+    }
+
+    private Bitmap buildResultCrop(Bitmap source) {
+        int width = source.getWidth();
+        int height = source.getHeight();
+        int left = Math.max(0, Math.round(width * 0.08f));
+        int top = Math.max(0, Math.round(height * 0.10f));
+        int right = Math.min(width, Math.round(width * 0.92f));
+        int bottom = Math.min(height, Math.round(height * 0.72f));
+        int cropWidth = Math.max(1, right - left);
+        int cropHeight = Math.max(1, bottom - top);
+
+        Bitmap crop = Bitmap.createBitmap(source,
+            left, top, cropWidth, cropHeight);
+        int targetWidth = Math.min(1600, Math.max(cropWidth, 1450));
+        if (targetWidth <= cropWidth) return crop;
+
+        int targetHeight = Math.max(1,
+            Math.round(cropHeight * targetWidth / (float) cropWidth));
+        Bitmap enlarged = Bitmap.createScaledBitmap(
+            crop, targetWidth, targetHeight, true);
+        crop.recycle();
+        return enlarged;
+    }
+
+    private VisualOcrRead recognizeVisualBitmap(Bitmap bitmap) throws Exception {
+        Text visionText = Tasks.await(
+            textRecognizer.process(InputImage.fromBitmap(bitmap, 0)),
+            20L, TimeUnit.SECONDS);
+        List<NperfScreenshotResultParser.Line> lines = new ArrayList<>();
+        for (Text.TextBlock block : visionText.getTextBlocks()) {
+            for (Text.Line line : block.getLines()) {
+                Rect bounds = line.getBoundingBox();
+                if (bounds != null && !line.getText().trim().isEmpty()) {
+                    lines.add(new NperfScreenshotResultParser.Line(
+                        line.getText(), bounds));
                 }
-                NperfBrowserCoordinator.Result visual =
-                    NperfScreenshotResultParser.parse(lines, width, height);
-                String recognizedText = visionText.getText();
-                boolean positionalComplete = hasVisualCompletionCue(lines, width, height);
-                handler.post(() -> applyVisualTextResult(visual, recognizedText,
-                    explicitComplete || positionalComplete));
-            })
-            .addOnFailureListener(ocrExecutor, error -> {
-                Log.e(TAG, "ML Kit could not read nPerf result", error);
-                handler.post(() -> status("OCR_FAILED",
-                    "No se pudo leer el panel nPerf; reintentando..."));
-            })
-            .addOnCompleteListener(ocrExecutor, task -> {
-                bitmap.recycle();
-                handler.post(() -> ocrInProgress = false);
-            });
+            }
+        }
+        NperfBrowserCoordinator.Result visual =
+            NperfScreenshotResultParser.parse(
+                lines, bitmap.getWidth(), bitmap.getHeight());
+        return new VisualOcrRead(
+            visual,
+            visionText.getText(),
+            hasVisualCompletionCue(lines, bitmap.getWidth(), bitmap.getHeight()));
     }
 
     private void applyVisualTextResult(NperfBrowserCoordinator.Result visual,
@@ -706,14 +777,23 @@ public class NperfBrowserAutomationService extends AccessibilityService {
             // Ignore Chrome's toolbar share icon and bottom browser controls.
             if (cy < 0.12f || cy > 0.82f || cx < 0.12f || cx > 0.92f) continue;
             String value = normalize(line.text);
-            if (containsAny(value, "probar de nuevo", "reiniciar test",
-                    "restart test", "share result", "compartir resultado") ||
-                    ((value.equals("compartir") || value.equals("share")) &&
-                     cy > 0.18f && cy < 0.62f)) {
+            if (containsFinalScreenCue(value) ||
+                    ((value.equals("compartir") || value.equals("share") ||
+                      value.equals("reiniciar") || value.equals("restart") ||
+                      value.equals("reinitier")) &&
+                     cy > 0.16f && cy < 0.68f)) {
                 return true;
             }
         }
         return false;
+    }
+
+    private boolean containsFinalScreenCue(String normalized) {
+        return containsAny(normalized,
+            "probar de nuevo", "reiniciar test", "reiniciar",
+            "restart test", "restart", "reinitier",
+            "compartir resultado", "compartir", "share result",
+            "resultado completo", "test finalizado", "prueba finalizada");
     }
 
     private boolean containsDataFailure(String normalized) {
