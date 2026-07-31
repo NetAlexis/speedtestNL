@@ -10,8 +10,8 @@ android {
         applicationId "com.netlife.speedtestnl"
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 341
+        versionName "3.4.1"
     }
 
     buildTypes {
