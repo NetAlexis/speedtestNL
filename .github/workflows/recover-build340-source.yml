@@ -1,0 +1,39 @@
+name: Recover build 340 source
+
+on:
+  push:
+    branches: [recover-build-340]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout historical source
+        uses: actions/checkout@v4
+
+      - name: Verify historical archive
+        run: |
+          test -f SpeedtestNL-main.zip
+          sha256sum SpeedtestNL-main.zip | tee SpeedtestNL-main.sha256
+          unzip -l SpeedtestNL-main.zip | tee archive-contents.txt
+
+      - name: Upload historical source
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeedtestNL-build340-historical-source
+          path: |
+            SpeedtestNL-main.zip
+            SpeedtestNL-main.sha256
+            archive-contents.txt
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Report recovery success
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue create --title "Build 340 source recovered - run $GITHUB_RUN_ID" --body "Historical source artifact ready. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
