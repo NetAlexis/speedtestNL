@@ -1,0 +1,55 @@
+name: Apply build 342 app-only patch
+
+on:
+  push:
+    branches:
+      - agent/build342-from-build340
+    paths:
+      - .github/workflows/apply-build342-app-only-now.yml
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout isolated build 340 branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decode and verify app-only patch
+        run: |
+          base64 -d .ci/build342-app-only.patch.gz.b64 | gzip -d > /tmp/build342-app-only.patch
+          git apply --check -p1 /tmp/build342-app-only.patch
+
+      - name: Apply app-only changes
+        run: git apply -p1 /tmp/build342-app-only.patch
+
+      - name: Commit app-only changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/build.gradle \
+            app/src/main/res/layout/activity_main.xml \
+            app/src/main/java/com/netlife/speedtestnl/MainActivity.java \
+            app/src/main/java/com/netlife/speedtestnl/NperfScreenshotResultParser.java \
+            app/src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java
+          git commit -m "Apply final app fixes on exact build 340 base"
+          git push origin HEAD:agent/build342-from-build340
+
+  report:
+    if: always()
+    needs: apply
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report app patch result
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Build 342 app patch ${{ needs.apply.result }} - run $GITHUB_RUN_ID" \
+            --body "App-only patch result: ${{ needs.apply.result }}. Source: $GITHUB_SHA. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
