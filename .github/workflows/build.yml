@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   build:
@@ -22,18 +23,51 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Set up Gradle 8.2
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.2'
 
       - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+        id: android_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --stacktrace assembleDebug 2>&1 | tee build-error.log
+
+      - name: Publish failure details
+        if: steps.android_build.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          {
+            echo 'El build Android falló.'
+            echo
+            echo "Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo '```text'
+            tail -n 180 build-error.log
+            echo '```'
+          } > issue-body.md
+          gh issue create \
+            --title "CI build 341 failed - run ${GITHUB_RUN_ID}" \
+            --body-file issue-body.md
+
+      - name: Stop after failed build
+        if: steps.android_build.outcome == 'failure'
+        run: exit 1
 
       - name: Prepare APK
+        if: steps.android_build.outcome == 'success'
         run: cp app/build/outputs/apk/debug/app-debug.apk SpeedtestNL-build-341.apk
 
       - name: Upload APK artifact
+        if: steps.android_build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: SpeedtestNL-build-341
@@ -42,6 +76,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish build 341 release
+        if: steps.android_build.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
