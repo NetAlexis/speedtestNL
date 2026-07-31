@@ -10,8 +10,8 @@ android {
         applicationId "com.netlife.speedtestnl"
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 19
+        versionName "2.8-build340-parser-fix"
     }
 
     buildTypes {
@@ -31,4 +31,169 @@ android {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.browser:browser:1.8.0'
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+}
+
+def nperfServiceSource = file('src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java')
+def nperfParserSource = file('src/main/java/com/netlife/speedtestnl/NperfScreenshotResultParser.java')
+
+tasks.register('applyBuild345NperfPatch') {
+    outputs.upToDateWhen { false }
+    doLast {
+        def patchOnce = { String source, String oldValue, String newValue, String label ->
+            int oldCount = source.count(oldValue)
+            int newCount = source.count(newValue)
+            // Check the final block first because some replacements intentionally
+            // contain the original block as a prefix.
+            if (newCount == 1) return source
+            if (oldCount == 1) return source.replace(oldValue, newValue)
+            throw new GradleException(
+                "Build 345 ${label} mismatch: old=${oldCount}, new=${newCount}")
+        }
+
+        String service = nperfServiceSource.getText('UTF-8')
+        service = patchOnce(service,
+            '    private static final long SESSION_TIMEOUT_MS = 135 * 1000L;',
+            '    private static final long SESSION_TIMEOUT_MS = 7 * 60 * 1000L;',
+            'session timeout')
+        service = patchOnce(service,
+            '    private static final long START_CONFIRM_TIMEOUT_MS = 45 * 1000L;',
+            '    private static final long START_CONFIRM_TIMEOUT_MS = 90 * 1000L;',
+            'start confirmation timeout')
+        service = patchOnce(service,
+            '    private static final long START_DATA_TIMEOUT_MS = 120 * 1000L;',
+            '    private static final long START_DATA_TIMEOUT_MS = 150 * 1000L;',
+            'metric timeout')
+        service = patchOnce(service,
+            '    private static final int MAX_OCR_ATTEMPTS = 10;',
+            '    private static final int MAX_OCR_ATTEMPTS = 40;',
+            'OCR attempts')
+
+        service = patchOnce(service,
+            '''        public void run() {
+            if (!syncSession()) return;
+            scheduleInspection(0L);
+            if (syncSession()) handler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+        }''',
+            '''        public void run() {
+            if (!syncSession()) return;
+            long now = SystemClock.elapsedRealtime();
+            if (firstStartRequestAt > 0L &&
+                    now - firstStartRequestAt >= STABLE_RESULT_FALLBACK_MIN_MS) {
+                requestVisualResultOcr(false, now);
+            }
+            scheduleInspection(0L);
+            if (syncSession()) handler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+        }''',
+            'independent OCR watchdog')
+
+        service = patchOnce(service,
+            '        if (!looksLikeNperf(normalized)) return;',
+            '''        // Require an nPerf identity only before the controlled start.
+        // Afterwards continue OCR even when Chrome exposes an empty page tree.
+        if (!looksLikeNperf(normalized) && firstStartRequestAt == 0L) return;''',
+            'post-start page guard')
+
+        service = patchOnce(service,
+            '''        ocrInProgress = true;
+        ocrAttempts++;
+        lastOcrAttemptAt = now;''',
+            '''        ocrInProgress = true;
+        ocrAttempts++;
+        lastOcrAttemptAt = now;
+        if (ocrAttempts == 1) {
+            handler.post(() -> android.widget.Toast.makeText(
+                getApplicationContext(),
+                "Capturando resultado nPerf...",
+                android.widget.Toast.LENGTH_SHORT).show());
+        }''',
+            'visible first capture confirmation')
+
+        service = patchOnce(service,
+            '''            if (containsAny(value, "probar de nuevo", "reiniciar test",
+                    "restart test", "share result", "compartir resultado") ||
+                    ((value.equals("compartir") || value.equals("share")) &&
+                     cy > 0.18f && cy < 0.62f)) {''',
+            '''            if (containsAny(value,
+                    "probar de nuevo", "reiniciar test", "reiniciar",
+                    "restart test", "restart", "share result",
+                    "compartir resultado", "compartir") ||
+                    ((value.equals("compartir") || value.equals("share")) &&
+                     cy > 0.18f && cy < 0.72f)) {''',
+            'short final-screen controls')
+
+        nperfServiceSource.write(service, 'UTF-8')
+
+        String parser = nperfParserSource.getText('UTF-8')
+        parser = patchOnce(parser,
+            '''        List<Marker> markers = new ArrayList<>();
+        List<Rect> averageMarkers = new ArrayList<>();
+
+        // OCR frequently splits “Media” and its number into separate nodes.
+        // Record every average label first so its detached numeric value can
+        // never be selected later as download, upload or latency.
+        for (Line line : lines) {
+            if (line == null || line.bounds.isEmpty()) continue;
+            if (isAverageLine(normalize(line.text))) {
+                averageMarkers.add(new Rect(line.bounds));
+            }
+        }''',
+            '''        List<Marker> markers = new ArrayList<>();
+        // Restore Build 340 candidate collection. Average values are excluded
+        // by requiring the two throughput values to share the primary row.''',
+            'over-broad average prefilter')
+
+        parser = patchOnce(parser,
+            '''            Role role = roleFor(line.text);
+            if (role != null) markers.add(new Marker(role, line.bounds));
+            boolean explicitPrimaryRole = role == Role.DOWNLOAD ||
+                role == Role.UPLOAD || role == Role.LATENCY;
+            if (!explicitPrimaryRole && isDetachedAverageValue(line.bounds,
+                    averageMarkers, imageWidth, imageHeight)) {
+                continue;
+            }''',
+            '''            Role role = roleFor(line.text);
+            if (role != null) markers.add(new Marker(role, line.bounds));
+            // Keep primary metrics even when OCR places them near Media.''',
+            'detached average candidate rejection')
+
+        parser = patchOnce(parser,
+            '''        Candidate first = eligible.get(0);
+        Candidate second = null;
+        for (int i = 1; i < eligible.size(); i++) {
+            Candidate candidate = eligible.get(i);
+            if (!samePhysicalValue(first, candidate)) {
+                second = candidate;
+                break;
+            }
+        }''',
+            '''        Candidate first = eligible.get(0);
+        Candidate second = null;
+        float rowTolerance = height * 0.075f;
+        float minimumHorizontalSeparation = width * 0.12f;
+        for (int i = 1; i < eligible.size(); i++) {
+            Candidate candidate = eligible.get(i);
+            boolean samePrimaryRow = Math.abs(
+                first.bounds.centerY() - candidate.bounds.centerY()) <= rowTolerance;
+            boolean horizontallySeparated = Math.abs(
+                first.bounds.centerX() - candidate.bounds.centerX()) >=
+                    minimumHorizontalSeparation;
+            if (!samePhysicalValue(first, candidate) &&
+                    samePrimaryRow && horizontallySeparated) {
+                second = candidate;
+                break;
+            }
+        }''',
+            'same-row throughput pair')
+
+        nperfParserSource.write(parser, 'UTF-8')
+    }
+}
+
+tasks.configureEach { task ->
+    if (task.name == 'compileReleaseJavaWithJavac' ||
+            task.name == 'compileDebugJavaWithJavac') {
+        task.dependsOn(tasks.named('applyBuild345NperfPatch'))
+    }
 }
