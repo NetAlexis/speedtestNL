@@ -10,8 +10,8 @@ android {
         applicationId "com.netlife.speedtestnl"
         minSdk 24
         targetSdk 34
-        versionCode 16
-        versionName "2.5-build340-final-fixes"
+        versionCode 18
+        versionName "2.7-build340-safe-ocr"
     }
 
     buildTypes {
@@ -35,4 +35,82 @@ dependencies {
 
     // Bundled Latin OCR model: available immediately and processed on-device.
     implementation 'com.google.mlkit:text-recognition:16.0.1'
+}
+
+// Build 344 keeps the verified Build 340/342 source as the repository base.
+// Before Java compilation, apply a small, idempotent patch to the nPerf service:
+// restore the original tolerant timeouts and keep OCR polling after Chrome stops
+// exposing accessible nPerf text. The build fails if the expected base differs.
+def nperfServiceSource = file('src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java')
+
+tasks.register('applyBuild344NperfPatch') {
+    outputs.upToDateWhen { false }
+    doLast {
+        String source = nperfServiceSource.getText('UTF-8')
+        List<List<String>> replacements = [
+            [
+                '    private static final long SESSION_TIMEOUT_MS = 135 * 1000L;',
+                '    private static final long SESSION_TIMEOUT_MS = 7 * 60 * 1000L;'
+            ],
+            [
+                '    private static final long START_CONFIRM_TIMEOUT_MS = 45 * 1000L;',
+                '    private static final long START_CONFIRM_TIMEOUT_MS = 90 * 1000L;'
+            ],
+            [
+                '    private static final long START_DATA_TIMEOUT_MS = 120 * 1000L;',
+                '    private static final long START_DATA_TIMEOUT_MS = 150 * 1000L;'
+            ],
+            [
+                '    private static final int MAX_OCR_ATTEMPTS = 10;',
+                '    private static final int MAX_OCR_ATTEMPTS = 40;'
+            ],
+            [
+                '''        public void run() {
+            if (!syncSession()) return;
+            scheduleInspection(0L);
+            if (syncSession()) handler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+        }''',
+                '''        public void run() {
+            if (!syncSession()) return;
+            long now = SystemClock.elapsedRealtime();
+            if (firstStartRequestAt > 0L &&
+                    now - firstStartRequestAt >= STABLE_RESULT_FALLBACK_MIN_MS) {
+                requestVisualResultOcr(false, now);
+            }
+            scheduleInspection(0L);
+            if (syncSession()) handler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+        }'''
+            ],
+            [
+                '        if (!looksLikeNperf(normalized)) return;',
+                '''        // Before starting, require proof that this is the nPerf page.
+        // After starting, continue OCR even if Chrome exposes no page text.
+        if (!looksLikeNperf(normalized) && firstStartRequestAt == 0L) return;'''
+            ]
+        ]
+
+        replacements.eachWithIndex { pair, index ->
+            String oldValue = pair[0]
+            String newValue = pair[1]
+            int oldCount = source.count(oldValue)
+            int newCount = source.count(newValue)
+            if (oldCount == 1 && newCount == 0) {
+                source = source.replace(oldValue, newValue)
+            } else if (oldCount == 0 && newCount == 1) {
+                // Already patched by a previous Gradle invocation in this workspace.
+            } else {
+                throw new GradleException(
+                    "Build 344 replacement ${index + 1} mismatch: old=${oldCount}, new=${newCount}")
+            }
+        }
+
+        nperfServiceSource.write(source, 'UTF-8')
+    }
+}
+
+tasks.configureEach { task ->
+    if (task.name == 'compileReleaseJavaWithJavac' ||
+            task.name == 'compileDebugJavaWithJavac') {
+        task.dependsOn(tasks.named('applyBuild344NperfPatch'))
+    }
 }
