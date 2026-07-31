@@ -32,14 +32,9 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'androidx.browser:browser:1.8.0'
-
-    // Bundled Latin OCR model: available immediately and processed on-device.
     implementation 'com.google.mlkit:text-recognition:16.0.1'
 }
 
-// Build 345 keeps the verified Build 340/342 application source and applies
-// exact, idempotent changes before Java compilation. The build stops if the
-// expected base differs, preventing an approximate reconstruction.
 def nperfServiceSource = file('src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java')
 def nperfParserSource = file('src/main/java/com/netlife/speedtestnl/NperfScreenshotResultParser.java')
 
@@ -49,12 +44,10 @@ tasks.register('applyBuild345NperfPatch') {
         def patchOnce = { String source, String oldValue, String newValue, String label ->
             int oldCount = source.count(oldValue)
             int newCount = source.count(newValue)
-            if (oldCount == 1 && newCount == 0) {
-                return source.replace(oldValue, newValue)
-            }
-            if (oldCount == 0 && newCount == 1) {
-                return source
-            }
+            // Check the final block first because some replacements intentionally
+            // contain the original block as a prefix.
+            if (newCount == 1) return source
+            if (oldCount == 1) return source.replace(oldValue, newValue)
             throw new GradleException(
                 "Build 345 ${label} mismatch: old=${oldCount}, new=${newCount}")
         }
@@ -88,7 +81,6 @@ tasks.register('applyBuild345NperfPatch') {
             long now = SystemClock.elapsedRealtime();
             if (firstStartRequestAt > 0L &&
                     now - firstStartRequestAt >= STABLE_RESULT_FALLBACK_MIN_MS) {
-                // Capture periodically even when Chrome no longer exposes page text.
                 requestVisualResultOcr(false, now);
             }
             scheduleInspection(0L);
@@ -99,8 +91,7 @@ tasks.register('applyBuild345NperfPatch') {
         service = patchOnce(service,
             '        if (!looksLikeNperf(normalized)) return;',
             '''        // Require an nPerf identity only before the controlled start.
-        // Afterwards, keep inspecting the visible browser even if accessibility
-        // returns an empty page tree on the final canvas screen.
+        // Afterwards continue OCR even when Chrome exposes an empty page tree.
         if (!looksLikeNperf(normalized) && firstStartRequestAt == 0L) return;''',
             'post-start page guard')
 
@@ -149,8 +140,8 @@ tasks.register('applyBuild345NperfPatch') {
             }
         }''',
             '''        List<Marker> markers = new ArrayList<>();
-        // Build 345 restores Build 340 candidate collection. Detached averages
-        // are rejected later by requiring download and upload on the same row.''',
+        // Restore Build 340 candidate collection. Average values are excluded
+        // by requiring the two throughput values to share the primary row.''',
             'over-broad average prefilter')
 
         parser = patchOnce(parser,
@@ -164,8 +155,7 @@ tasks.register('applyBuild345NperfPatch') {
             }''',
             '''            Role role = roleFor(line.text);
             if (role != null) markers.add(new Marker(role, line.bounds));
-            // Do not discard a primary metric merely because OCR placed its
-            // bounding box near a Media/Promedio label.''',
+            // Keep primary metrics even when OCR places them near Media.''',
             'detached average candidate rejection')
 
         parser = patchOnce(parser,
