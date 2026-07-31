@@ -10,8 +10,8 @@ android {
         applicationId "com.netlife.speedtestnl"
         minSdk 24
         targetSdk 34
-        versionCode 15
-        versionName "2.4-repeat-and-nperf-mapping"
+        versionCode 16
+        versionName "2.5-build340-final-fixes"
     }
 
     buildTypes {
