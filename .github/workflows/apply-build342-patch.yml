@@ -1,0 +1,41 @@
+name: Apply build 342 patch
+
+on:
+  push:
+    branches:
+      - agent/build342-from-build340
+    paths:
+      - .ci/build342.patch.gz.b64
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout isolated build 340 branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decode and verify patch
+        run: |
+          base64 -d .ci/build342.patch.gz.b64 | gzip -d > /tmp/build342.patch
+          git apply --check -p1 /tmp/build342.patch
+
+      - name: Apply minimal build 342 changes
+        run: git apply -p1 /tmp/build342.patch
+
+      - name: Commit isolated changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/build.gradle \
+            app/src/main/res/layout/activity_main.xml \
+            app/src/main/java/com/netlife/speedtestnl/MainActivity.java \
+            app/src/main/java/com/netlife/speedtestnl/NperfScreenshotResultParser.java \
+            app/src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java \
+            .github/workflows/build.yml
+          git commit -m "Apply final fixes on exact build 340 base"
+          git push origin HEAD:agent/build342-from-build340
