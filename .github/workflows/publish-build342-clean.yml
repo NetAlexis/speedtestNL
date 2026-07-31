@@ -1,0 +1,44 @@
+name: Publish clean build 342 branch
+
+on:
+  push:
+    branches:
+      - agent/build342-from-build340
+    paths:
+      - .github/workflows/publish-build342-clean.yml
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cherry-pick app-only commit into clean branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin agent/build342-clean agent/build342-from-build340
+          git checkout -B agent/build342-clean origin/agent/build342-clean
+          git cherry-pick f263560
+          git push origin HEAD:agent/build342-clean
+
+  report:
+    if: always()
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report clean branch result
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Build 342 clean branch ${{ needs.publish.result }} - run $GITHUB_RUN_ID" \
+            --body "Clean branch publication: ${{ needs.publish.result }}. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
