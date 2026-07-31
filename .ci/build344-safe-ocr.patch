@@ -1,0 +1,66 @@
+diff --git a/app/build.gradle b/app/build.gradle
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -10,8 +10,8 @@ android {
+         applicationId "com.netlife.speedtestnl"
+         minSdk 24
+         targetSdk 34
+-        versionCode 16
+-        versionName "2.5-build340-final-fixes"
++        versionCode 18
++        versionName "2.7-build340-safe-ocr"
+     }
+ 
+     buildTypes {
+diff --git a/app/src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java b/app/src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java
+--- a/app/src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java
++++ b/app/src/main/java/com/netlife/speedtestnl/NperfBrowserAutomationService.java
+@@ -45,14 +45,14 @@ public class NperfBrowserAutomationService extends AccessibilityService {
+ 
+     private static final String TAG = "SpeedtestNL-nPerfTab";
+ 
+-    private static final long SESSION_TIMEOUT_MS = 135 * 1000L;
++    private static final long SESSION_TIMEOUT_MS = 7 * 60 * 1000L;
+     private static final long PAGE_READY_DELAY_MS = 2500L;
+     private static final long START_RETRY_INTERVAL_MS = 8000L;
+-    private static final long START_CONFIRM_TIMEOUT_MS = 45 * 1000L;
+-    private static final long START_DATA_TIMEOUT_MS = 120 * 1000L;
++    private static final long START_CONFIRM_TIMEOUT_MS = 90 * 1000L;
++    private static final long START_DATA_TIMEOUT_MS = 150 * 1000L;
+     private static final long OCR_START_AFTER_MS = 18 * 1000L;
+     private static final long OCR_START_WHILE_UNCONFIRMED_MS = 12 * 1000L;
+     private static final long OCR_RETRY_INTERVAL_MS = 7000L;
+@@ -64,7 +64,7 @@ public class NperfBrowserAutomationService extends AccessibilityService {
+     private static final int MAX_ACCESSIBILITY_TEXT_LINES = 500;
+     private static final int MAX_START_ATTEMPTS = 3;
+-    private static final int MAX_OCR_ATTEMPTS = 10;
++    private static final int MAX_OCR_ATTEMPTS = 40;
+ 
+     private enum Stage {
+         WAITING_PAGE,
+@@ -118,6 +118,13 @@ public class NperfBrowserAutomationService extends AccessibilityService {
+         @Override
+         public void run() {
+             if (!syncSession()) return;
++            long now = SystemClock.elapsedRealtime();
++            if (firstStartRequestAt > 0L &&
++                    now - firstStartRequestAt >= STABLE_RESULT_FALLBACK_MIN_MS) {
++                // Chrome may stop exposing the page text after nPerf finishes.
++                // Keep reading the visible panel without depending on accessibility text.
++                requestVisualResultOcr(false, now);
++            }
+             scheduleInspection(0L);
+             if (syncSession()) handler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+         }
+@@ -292,7 +299,10 @@ public class NperfBrowserAutomationService extends AccessibilityService {
+         String joined = join(lines);
+         String normalized = normalize(joined);
+ 
+-        if (!looksLikeNperf(normalized)) return;
++        // Before starting, require proof that this is the nPerf page. After the
++        // controlled start action, keep inspecting even when Chrome stops
++        // exposing nPerf text while the visual result card remains on screen.
++        if (!looksLikeNperf(normalized) && firstStartRequestAt == 0L) return;
+ 
+         long now = SystemClock.elapsedRealtime();
+         if (firstPageSeenAt == 0L) firstPageSeenAt = now;
