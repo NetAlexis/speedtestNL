@@ -10,8 +10,8 @@ android {
         applicationId "com.netlife.speedtestnl"
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 17
+        versionName "2.6.1-nperf-final-screen-ocr"
     }
 
     buildTypes {
@@ -31,4 +31,8 @@ android {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.browser:browser:1.8.0'
+
+    // Bundled Latin OCR model: available immediately and processed on-device.
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
 }
