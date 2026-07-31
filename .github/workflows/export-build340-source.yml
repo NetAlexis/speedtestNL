@@ -1,0 +1,42 @@
+name: Export build 340 source
+
+on:
+  push:
+    branches:
+      - agent/build342-from-build340
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+
+      - name: Package source
+        run: |
+          zip -qr SpeedtestNL-build340-source.zip . \
+            -x '.git/*' \
+            -x 'SpeedtestNL-build340-source.zip'
+          sha256sum SpeedtestNL-build340-source.zip > SpeedtestNL-build340-source.sha256
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeedtestNL-build340-source
+          path: |
+            SpeedtestNL-build340-source.zip
+            SpeedtestNL-build340-source.sha256
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Report source export
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "Build 340 source exported - run $GITHUB_RUN_ID" \
+            --body "Exact source exported from $GITHUB_SHA. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
