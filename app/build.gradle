@@ -11,7 +11,7 @@ android {
         minSdk 24
         targetSdk 34
         versionCode 17
-        versionName "2.6-nperf-final-screen-ocr"
+        versionName "2.6.1-nperf-final-screen-ocr"
     }
 
     buildTypes {
